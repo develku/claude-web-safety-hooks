@@ -1,0 +1,163 @@
+# Claude Code Web Safety Hooks
+
+Defense-in-depth hooks for [Claude Code](https://docs.anthropic.com/en/docs/claude-code) that protect against **prompt injection from web content**.
+
+When Claude Code fetches web pages or searches the web, the returned content could contain hidden instructions designed to manipulate Claude's behavior. These hooks add two layers of protection.
+
+## How It Works
+
+### Layer 1: PreToolUse — Defensive Priming
+
+Before any web-fetching tool runs, a `systemMessage` is injected reminding Claude that incoming content is **untrusted external data** and should not be followed as instructions.
+
+### Layer 2: PostToolUse — Injection Scanner
+
+After web content is returned, a shell script scans for **580+ prompt injection patterns** across 16 categories:
+
+| Category | Examples |
+|---|---|
+| Instruction Override | `ignore previous instructions`, `bypass your programming`, `new system prompt` |
+| Role Manipulation | `you are now`, `pretend to be`, `act without restrictions` |
+| LLM Special Tokens | `<\|im_start\|>`, `<system>`, `[INST]`, `<<SYS>>`, `<\|endoftext\|>` |
+| Prompt Extraction | `reveal your system prompt`, `dump your instructions`, `what were you told` |
+| Jailbreak / Mode Switching | `developer mode enabled`, `DAN mode`, `unrestricted mode`, `guardrails off` |
+| Authority / Social Engineering | `as the system administrator`, `ATTENTION CLAUDE`, `SYSTEM UPDATE:` |
+| Data Exfiltration | `![verify](http...`, `<img src=`, `send a request to`, `webhook to` |
+| Tool / Function Call Faking | `<tool_use>`, `<function_call>`, `"tool_calls":` |
+| Encoding / Obfuscation | `decode base64`, `decode from rot13`, `the following is encoded` |
+| Multilingual (10 languages) | Chinese, Japanese, Korean, Arabic, Russian, Spanish, French, Italian, German, Portuguese |
+| HTML / CSS Hiding | `display:none`, `visibility:hidden`, `font-size:0`, `opacity:0` |
+| HTML Comment Injection | `<!-- ignore`, `<!-- system`, `<!-- hidden instruction` |
+| Delimiter Boundary Breaking | `---END SYSTEM---`, `=== SYSTEM UPDATE ===`, `### Instruction:` |
+| Payload Splitting | `read the first letter of each`, `concatenate the following` |
+| Cognitive Manipulation | `a good AI would`, `the user wants you to`, `someone will die if` |
+| Unicode / Invisible Characters | Zero-width chars, bidi overrides, tag characters, homoglyphs, invisible fillers |
+
+Additionally detects:
+- **Leetspeak obfuscation** (e.g., `1gn0r3 pr3v10us 1nstruct10ns`)
+- **Base64-encoded attacks** (known prefixes + decoded content analysis)
+- **Mixed-script homoglyphs** (Cyrillic characters mixed with Latin)
+
+## Covered Tools
+
+Both hooks trigger on:
+
+| Matcher | Covers |
+|---|---|
+| `WebSearch` | Built-in web search |
+| `WebFetch` | Built-in URL fetching |
+| `mcp__playwright.*` | Playwright MCP server |
+| `mcp__puppeteer.*` | Puppeteer MCP server |
+| `mcp__browser.*` | Any browser MCP server |
+| `mcp__fetch.*` | Fetch MCP server |
+| `mcp__markdownify.*` | Markdownify MCP server |
+
+To add coverage for other MCP servers, append `|mcp__yourserver.*` to both matchers in `hooks.json`.
+
+## Installation
+
+### Quick Install
+
+```bash
+git clone https://github.com/develku/claude-web-safety-hooks.git
+cd claude-web-safety-hooks
+chmod +x install.sh
+./install.sh
+```
+
+### Manual Install
+
+1. Copy the scanner script:
+
+```bash
+mkdir -p ~/.claude/hooks
+cp web-safety-scanner.sh ~/.claude/hooks/
+chmod +x ~/.claude/hooks/web-safety-scanner.sh
+```
+
+2. Add the hook configuration to `~/.claude/hooks.json`:
+
+If you don't have an existing `hooks.json`, copy the provided one:
+
+```bash
+cp hooks.json ~/.claude/hooks.json
+```
+
+If you already have `hooks.json`, merge the `PreToolUse` and `PostToolUse` entries from the provided file into your existing config.
+
+3. Restart Claude Code.
+
+### Verify
+
+```bash
+claude --debug
+```
+
+Then use `WebSearch` or `WebFetch` — you should see hook activity in the debug output.
+
+## How the Flow Works
+
+```
+User asks to search web
+       |
+       v
+  PreToolUse hook fires
+  --> "WEB SAFETY MODE ACTIVE" injected
+       |
+       v
+  WebSearch / WebFetch / MCP tool runs
+  --> Results come back
+       |
+       v
+  PostToolUse hook fires
+  --> Scanner checks 580+ patterns across 16 categories
+       |
+       +---> Clean: no extra output
+       +---> Suspicious: WARNING injected with detected patterns
+       |
+       v
+  Claude processes results with safety context
+```
+
+## Limitations
+
+This is **not bulletproof**. Be aware of:
+
+- **Same context window**: Defensive instructions and injected content coexist in the same context. A sufficiently sophisticated injection could still influence behavior.
+- **Pattern-based detection**: The scanner catches known patterns. Novel injection techniques may bypass it.
+- **Not a substitute for human review**: The permission system (you approving tool calls) remains the strongest protection.
+- **Performance**: Scanning 580+ patterns adds a small delay (~100ms) after each web fetch.
+
+This is one layer in a defense-in-depth strategy. It significantly raises the bar for injection attacks, but it does not eliminate the risk.
+
+## Customization
+
+### Adding patterns
+
+Edit `web-safety-scanner.sh` and add entries to the relevant category array:
+
+```bash
+CAT1_PATTERNS=(
+  # ... existing patterns ...
+  "your new pattern here"
+)
+```
+
+### Adding MCP server coverage
+
+Edit both matchers in `hooks.json`:
+
+```json
+"matcher": "WebSearch|WebFetch|mcp__playwright.*|mcp__yournewserver.*"
+```
+
+## Requirements
+
+- Claude Code CLI
+- `jq` (for JSON parsing)
+- `bash` 3.2+ (macOS default works)
+- `grep` with `-P` flag for Unicode detection (optional, degrades gracefully)
+
+## License
+
+MIT
