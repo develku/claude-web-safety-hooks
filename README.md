@@ -119,6 +119,47 @@ User asks to search web
   Claude processes results with safety context
 ```
 
+## Token Consumption
+
+The scanner itself runs as a **pure shell process** — no LLM calls, zero API tokens.
+
+| Component | Token Cost | When |
+|---|---|---|
+| PreToolUse systemMessage | ~80 tokens | Every web tool call |
+| PostToolUse scanner (bash) | 0 tokens | Every web tool call |
+| PostToolUse warning | ~50 tokens | Only when patterns detected |
+| **Typical cost per web fetch** | **~80 tokens** | |
+
+For context, a typical Claude Code conversation uses 50,000–200,000+ tokens. The ~80 token overhead per web fetch is negligible.
+
+## Comparison with Other Approaches
+
+### Claude Code Hooks
+
+| Project | Patterns | Token Cost | Detection Type |
+|---|---|---|---|
+| **This project** | 580+ across 16 categories | ~80 tokens | Pattern + leetspeak + base64 + Unicode + homoglyph |
+| [Lasso Security claude-hooks](https://github.com/lasso-security/claude-hooks) | ~50 across 5 categories | ~30-50 tokens | Pattern only |
+| [Nova Tracer](https://github.com/fr0gger/nova-claude-code-protector) | Multi-tier | Moderate (LLM tier) | Pattern + ML classifier + LLM evaluation |
+
+### Broader Landscape
+
+| Approach | Type | Token Cost | Latency | Stops Adaptive Attacks? |
+|---|---|---|---|---|
+| **Pattern-based** (this project) | String matching | ~80 tokens | ~100ms | No — but catches known/opportunistic attacks |
+| **ML classifiers** ([ProtectAI DeBERTa](https://huggingface.co/protectai/deberta-v3-base-prompt-injection-v2), [Meta Prompt Guard](https://huggingface.co/meta-llama/Llama-Prompt-Guard-2-86M)) | Local model inference | 0 tokens | 50-200ms | No — bypassed at >90% by adaptive attacks |
+| **LLM-based** ([Rebuff](https://github.com/protectai/rebuff), [OpenAI Guardrails](https://openai.github.io/openai-guardrails-python/)) | Uses LLM to judge | High (extra LLM call) | 1-4s | No — "same model different hat" vulnerability |
+| **Commercial SaaS** ([Lakera Guard](https://www.lakera.ai/lakera-guard)) | Proprietary ML, continuously updated | Per-API-call pricing | <200ms | Better, but not immune |
+| **Model fine-tuning** ([Instruction Hierarchy](https://openai.com/index/the-instruction-hierarchy/), [StruQ/SecAlign](https://bair.berkeley.edu/blog/2025/04/11/prompt-injection-defense/)) | Baked into model weights | 0 tokens | 0ms | Partially — still bypassed at >90% |
+
+### Key Takeaway
+
+A joint study by OpenAI, Anthropic, and Google DeepMind researchers (["The Attacker Moves Second", Oct 2025](https://arxiv.org/abs/2510.09023)) tested 12 published defenses with adaptive attacks — **every single one was bypassed at >90% success rate**. This includes ML classifiers, adversarial fine-tuning, and secret-signal defenses.
+
+**No single defense is sufficient.** The practical value of any defense (including this one) is raising the bar against unsophisticated and opportunistic attacks, which are the vast majority of real-world prompt injections found in web content.
+
+This project's tradeoff: **maximum coverage for minimum cost** — 580+ patterns, zero LLM tokens, ~100ms latency, drop-in installation. Pair it with human review (Claude Code's permission system) for the strongest practical defense.
+
 ## Limitations
 
 This is **not bulletproof**. Be aware of:
