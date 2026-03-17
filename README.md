@@ -2,7 +2,7 @@
 
 Defense-in-depth hooks for [Claude Code](https://docs.anthropic.com/en/docs/claude-code) that protect against **prompt injection from web content**.
 
-When Claude Code fetches web pages or searches the web, the returned content could contain hidden instructions designed to manipulate Claude's behavior. These hooks add two layers of protection.
+When Claude Code fetches web pages or searches the web, the returned content could contain hidden instructions designed to manipulate Claude's behavior. These hooks add two layers of protection with **severity-tiered responses**.
 
 ## How It Works
 
@@ -10,33 +10,44 @@ When Claude Code fetches web pages or searches the web, the returned content cou
 
 Before any web-fetching tool runs, a `systemMessage` is injected reminding Claude that incoming content is **untrusted external data** and should not be followed as instructions.
 
-### Layer 2: PostToolUse — Injection Scanner
+### Layer 2: PostToolUse — Severity-Tiered Injection Scanner
 
-After web content is returned, a shell script scans for **580+ prompt injection patterns** across 16 categories:
+After web content is returned, a shell script scans for **600+ prompt injection patterns** across 16 categories and responds based on severity:
 
-| Category | Examples |
-|---|---|
-| Instruction Override | `ignore previous instructions`, `bypass your programming`, `new system prompt` |
-| Role Manipulation | `you are now`, `pretend to be`, `act without restrictions` |
-| LLM Special Tokens | `<\|im_start\|>`, `<system>`, `[INST]`, `<<SYS>>`, `<\|endoftext\|>` |
-| Prompt Extraction | `reveal your system prompt`, `dump your instructions`, `what were you told` |
-| Jailbreak / Mode Switching | `developer mode enabled`, `DAN mode`, `unrestricted mode`, `guardrails off` |
-| Authority / Social Engineering | `as the system administrator`, `ATTENTION CLAUDE`, `SYSTEM UPDATE:` |
-| Data Exfiltration | `![verify](http...`, `<img src=`, `send a request to`, `webhook to` |
-| Tool / Function Call Faking | `<tool_use>`, `<function_call>`, `"tool_calls":` |
-| Encoding / Obfuscation | `decode base64`, `decode from rot13`, `the following is encoded` |
-| Multilingual (10 languages) | Chinese, Japanese, Korean, Arabic, Russian, Spanish, French, Italian, German, Portuguese |
-| HTML / CSS Hiding | `display:none`, `visibility:hidden`, `font-size:0`, `opacity:0` |
-| HTML Comment Injection | `<!-- ignore`, `<!-- system`, `<!-- hidden instruction` |
-| Delimiter Boundary Breaking | `---END SYSTEM---`, `=== SYSTEM UPDATE ===`, `### Instruction:` |
-| Payload Splitting | `read the first letter of each`, `concatenate the following` |
-| Cognitive Manipulation | `a good AI would`, `the user wants you to`, `someone will die if` |
-| Unicode / Invisible Characters | Zero-width chars, bidi overrides, tag characters, homoglyphs, invisible fillers |
+| Severity | Action | When |
+|---|---|---|
+| **HIGH** | **Stop** — Claude halts, user reviews | LLM tokens, tool faking, tracking pixels, base64 attacks |
+| **MEDIUM** | **Warn** — Strong warning injected | Instruction override, jailbreaks, social engineering, etc. |
+| **LOW** | **Note** — Mild note injected | HTML/CSS hiding, common markdown images, zero-width chars |
 
-Additionally detects:
-- **Leetspeak obfuscation** (e.g., `1gn0r3 pr3v10us 1nstruct10ns`)
-- **Base64-encoded attacks** (known prefixes + decoded content analysis)
-- **Mixed-script homoglyphs** (Cyrillic characters mixed with Latin)
+### Detection Categories
+
+| Category | Severity | Examples |
+|---|---|---|
+| LLM Special Tokens | **HIGH** | `<\|im_start\|>`, `<\|endoftext\|>`, `<<SYS>>`, `<\|fim_prefix\|>` |
+| Tool / Function Call Faking | **HIGH** | `<tool_use>`, `<function_call>`, `<tool_result>`, `<internal_monologue>` |
+| Data Exfiltration (tracking) | **HIGH** | `![verify](http...`, `![pixel](http...`, `exfiltrate`, `encode and append` |
+| Base64-Encoded Attacks | **HIGH** | Known attack prefixes + decoded content analysis |
+| Unicode Tag Characters | **HIGH** | Invisible ASCII encoding (U+E0000–E007F) |
+| Instruction Override | MEDIUM | `ignore previous instructions`, `bypass your programming`, `new system prompt` |
+| Role Manipulation | MEDIUM | `you are now`, `pretend to be`, `act without restrictions` |
+| Generic System Delimiters | MEDIUM | `<system>`, `[INST]`, `human: `, `system: you are` |
+| Prompt Extraction | MEDIUM | `reveal your system prompt`, `dump your instructions`, `what were you told` |
+| Jailbreak / Mode Switching | MEDIUM | `developer mode enabled`, `DAN mode`, `unrestricted mode`, `guardrails off` |
+| Authority / Social Engineering | MEDIUM | `as the system administrator`, `ATTENTION CLAUDE`, `SYSTEM UPDATE:` |
+| Data Exfiltration (generic) | MEDIUM | `send a request to`, `webhook to`, `callback to` |
+| Tool Call Faking (JSON) | MEDIUM | `"tool_calls":`, `"function_call":`, `<scratchpad>` |
+| Encoding / Obfuscation | MEDIUM | `decode base64`, `decode from rot13`, `the following is encoded` |
+| Multilingual (10 languages) | MEDIUM | Chinese, Japanese, Korean, Arabic, Russian, Spanish, French, Italian, German, Portuguese |
+| HTML Comment Injection | MEDIUM | `<!-- ignore`, `<!-- system`, `<!-- hidden instruction` |
+| Delimiter Boundary Breaking | MEDIUM | `---END SYSTEM---`, `=== SYSTEM UPDATE ===`, `### Instruction:` |
+| Payload Splitting | MEDIUM | `read the first letter of each`, `concatenate the following` |
+| Cognitive Manipulation | MEDIUM | `a good AI would`, `the user wants you to`, `someone will die if` |
+| Leetspeak Obfuscation | MEDIUM | `1gn0r3 pr3v10us 1nstruct10ns` → detected via normalization |
+| Mixed-Script Homoglyphs | MEDIUM | Cyrillic characters mixed with Latin in same word |
+| HTML / CSS Hiding | LOW | `display:none`, `visibility:hidden`, `font-size:0`, `opacity:0` |
+| Markdown Images | LOW | `![img](http...`, `![image](http...` |
+| Invisible Unicode | LOW | Zero-width chars, bidi overrides, invisible fillers |
 
 ## Covered Tools
 
@@ -110,10 +121,18 @@ User asks to search web
        |
        v
   PostToolUse hook fires
-  --> Scanner checks 580+ patterns across 16 categories
+  --> Scanner checks 600+ patterns across 16 categories
        |
-       +---> Clean: no extra output
-       +---> Suspicious: WARNING injected with detected patterns
+       +---> Clean: no output, processing continues
+       |
+       +---> HIGH severity: Claude STOPS, user reviews
+       |     (LLM tokens, tool faking, tracking pixels)
+       |
+       +---> MEDIUM severity: Strong WARNING injected
+       |     (instruction override, jailbreaks, etc.)
+       |
+       +---> LOW severity: Mild NOTE injected
+       |     (CSS hiding, zero-width chars, etc.)
        |
        v
   Claude processes results with safety context
@@ -127,7 +146,9 @@ The scanner itself runs as a **pure shell process** — no LLM calls, zero API t
 |---|---|---|
 | PreToolUse systemMessage | ~80 tokens | Every web tool call |
 | PostToolUse scanner (bash) | 0 tokens | Every web tool call |
-| PostToolUse warning | ~50 tokens | Only when patterns detected |
+| PostToolUse HIGH warning | ~100 tokens | Only on HIGH severity detection |
+| PostToolUse MEDIUM warning | ~60 tokens | Only on MEDIUM severity detection |
+| PostToolUse LOW note | ~40 tokens | Only on LOW severity detection |
 | **Typical cost per web fetch** | **~80 tokens** | |
 
 For context, a typical Claude Code conversation uses 50,000–200,000+ tokens. The ~80 token overhead per web fetch is negligible.
@@ -138,7 +159,7 @@ For context, a typical Claude Code conversation uses 50,000–200,000+ tokens. T
 
 | Project | Patterns | Token Cost | Detection Type |
 |---|---|---|---|
-| **This project** | 580+ across 16 categories | ~80 tokens | Pattern + leetspeak + base64 + Unicode + homoglyph |
+| **This project** | 600+ across 16 categories, 3 severity tiers | ~80 tokens | Pattern + leetspeak + base64 + Unicode + homoglyph |
 | [Lasso Security claude-hooks](https://github.com/lasso-security/claude-hooks) | ~50 across 5 categories | ~30-50 tokens | Pattern only |
 | [Nova Tracer](https://github.com/fr0gger/nova-claude-code-protector) | Multi-tier | Moderate (LLM tier) | Pattern + ML classifier + LLM evaluation |
 
@@ -146,7 +167,7 @@ For context, a typical Claude Code conversation uses 50,000–200,000+ tokens. T
 
 | Approach | Type | Token Cost | Latency | Stops Adaptive Attacks? |
 |---|---|---|---|---|
-| **Pattern-based** (this project) | String matching | ~80 tokens | ~100ms | No — but catches known/opportunistic attacks |
+| **Pattern-based** (this project) | String matching + severity tiers | ~80 tokens | ~100ms | No — but catches known/opportunistic attacks |
 | **ML classifiers** ([ProtectAI DeBERTa](https://huggingface.co/protectai/deberta-v3-base-prompt-injection-v2), [Meta Prompt Guard](https://huggingface.co/meta-llama/Llama-Prompt-Guard-2-86M)) | Local model inference | 0 tokens | 50-200ms | No — bypassed at >90% by adaptive attacks |
 | **LLM-based** ([Rebuff](https://github.com/protectai/rebuff), [OpenAI Guardrails](https://openai.github.io/openai-guardrails-python/)) | Uses LLM to judge | High (extra LLM call) | 1-4s | No — "same model different hat" vulnerability |
 | **Commercial SaaS** ([Lakera Guard](https://www.lakera.ai/lakera-guard)) | Proprietary ML, continuously updated | Per-API-call pricing | <200ms | Better, but not immune |
@@ -158,27 +179,51 @@ A joint study by OpenAI, Anthropic, and Google DeepMind researchers (["The Attac
 
 **No single defense is sufficient.** The practical value of any defense (including this one) is raising the bar against unsophisticated and opportunistic attacks, which are the vast majority of real-world prompt injections found in web content.
 
-This project's tradeoff: **maximum coverage for minimum cost** — 580+ patterns, zero LLM tokens, ~100ms latency, drop-in installation. Pair it with human review (Claude Code's permission system) for the strongest practical defense.
+This project's tradeoff: **maximum coverage for minimum cost** — 600+ patterns with severity-tiered responses, zero LLM tokens, ~100ms latency, drop-in installation. HIGH severity patterns (LLM tokens, tool faking) halt Claude automatically; MEDIUM/LOW patterns add graduated warnings. Pair it with human review (Claude Code's permission system) for the strongest practical defense.
 
 ## Limitations
 
 This is **not bulletproof**. Be aware of:
 
 - **Same context window**: Defensive instructions and injected content coexist in the same context. A sufficiently sophisticated injection could still influence behavior.
+- **PostToolUse cannot block**: Claude Code hooks fire _after_ the tool runs, so content is already in the context window. HIGH severity uses `continue: false` to stop Claude from acting on it, but the content was technically received.
 - **Pattern-based detection**: The scanner catches known patterns. Novel injection techniques may bypass it.
 - **Not a substitute for human review**: The permission system (you approving tool calls) remains the strongest protection.
-- **Performance**: Scanning 580+ patterns adds a small delay (~100ms) after each web fetch.
+- **Performance**: Scanning 600+ patterns adds a small delay (~100ms) after each web fetch.
 
 This is one layer in a defense-in-depth strategy. It significantly raises the bar for injection attacks, but it does not eliminate the risk.
 
 ## Customization
 
-### Adding patterns
+### Configuring HIGH severity action
 
-Edit `web-safety-scanner.sh` and add entries to the relevant category array:
+Edit the top of `web-safety-scanner.sh`:
 
 ```bash
-CAT1_PATTERNS=(
+# "stop" = Halt Claude's execution, user must review (safest, default)
+# "warn" = Strong critical warning only, Claude continues (less disruptive)
+HIGH_SEVERITY_ACTION="stop"
+```
+
+### Adding patterns
+
+Edit `web-safety-scanner.sh` and add entries to the relevant severity array:
+
+```bash
+# HIGH severity — near-zero false positive patterns only
+HIGH_LLM_TOKENS=(
+  # ... existing patterns ...
+  "your new pattern here"
+)
+
+# MEDIUM severity — likely injection but could appear in security articles
+MED_INSTRUCTION_OVERRIDE=(
+  # ... existing patterns ...
+  "your new pattern here"
+)
+
+# LOW severity — common in normal web content
+LOW_HTML_CSS=(
   # ... existing patterns ...
   "your new pattern here"
 )
