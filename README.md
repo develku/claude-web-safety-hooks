@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="attachments/logo.png" alt="Claude Web Safety Hooks" width="600">
+</p>
+
 # Claude Code Web Safety Hooks
 
 Defense-in-depth hooks for [Claude Code](https://docs.anthropic.com/en/docs/claude-code) that protect against **prompt injection from web content**.
