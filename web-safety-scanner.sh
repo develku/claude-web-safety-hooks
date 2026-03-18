@@ -66,6 +66,7 @@ RATE_LIMIT_SECONDS=5
 # =============================================================================
 INPUT=$(cat)
 TOOL_NAME=$(echo "$INPUT" | jq -r '.tool_name // "unknown"')
+TOOL_URL=$(echo "$INPUT" | jq -r '.tool_input.url // .tool_input.URL // ""')
 TOOL_OUTPUT=$(echo "$INPUT" | jq -r '.tool_response // .tool_output // ""')
 
 
@@ -950,7 +951,12 @@ format_list() {
 log_detection() {
   local severity="$1"
   local patterns="$2"
-  echo "[$(date '+%Y-%m-%d %H:%M:%S')] [${severity}] tool=${TOOL_NAME} patterns=${patterns}" >> "$LOG_FILE"
+  local log_line="[$(date '+%Y-%m-%d %H:%M:%S')] [${severity}] tool=${TOOL_NAME}"
+  if [ -n "$TOOL_URL" ]; then
+    log_line="${log_line} url=${TOOL_URL}"
+  fi
+  log_line="${log_line} patterns=${patterns}"
+  echo "$log_line" >> "$LOG_FILE"
 }
 
 # Send macOS notification with rate limiting
