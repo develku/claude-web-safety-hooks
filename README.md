@@ -128,14 +128,13 @@ Add the following to the `hooks` section of your `settings.json`:
 
 ### Verify
 
-Test the scanner directly:
+Ask Claude to fetch a page that discusses prompt injection:
 
-```bash
-# MEDIUM severity — instruction override detected
-searching 'https://blog.cyberdesserts.com/prompt-injection-attacks/'
+```
+search https://blog.cyberdesserts.com/prompt-injection-attacks/
 ```
 
-Both tests should output JSON with `"continue": false`. On macOS, you should also see a notification with sound.
+You should see a macOS notification (with sound) and the scanner should pause or stop Claude depending on severity.
 
 Check the audit log:
 
