@@ -1,5 +1,5 @@
 #!/bin/bash
-# Claude Code Web Safety Scanner v4.0
+# Claude Code Web Safety Scanner v4.1
 # Severity-tiered prompt injection detection for web content.
 #
 # Severity Levels:
@@ -944,6 +944,39 @@ format_list() {
 }
 
 # =============================================================================
+# Content snippet extraction
+# Extracts actual lines from tool output that triggered pattern matches
+# =============================================================================
+extract_snippets() {
+  local -a patterns=()
+  local max_total=10
+  local count=0
+  local snippets=""
+
+  # Read patterns from arguments
+  while [ $# -gt 0 ]; do
+    patterns+=("$1")
+    shift
+  done
+
+  for pattern in "${patterns[@]}"; do
+    [ $count -ge $max_total ] && break
+    lc_pattern=$(echo "$pattern" | tr '[:upper:]' '[:lower:]')
+    while IFS= read -r line; do
+      [ $count -ge $max_total ] && break
+      # Trim leading/trailing whitespace, truncate to 200 chars
+      trimmed=$(echo "$line" | sed 's/^[[:space:]]*//' | cut -c1-200)
+      if [ -n "$trimmed" ]; then
+        snippets="${snippets}  → [${pattern}]: ${trimmed}"$'\n'
+        count=$((count + 1))
+      fi
+    done < <(echo "$TOOL_OUTPUT" | grep -iF -- "$lc_pattern" 2>/dev/null | head -3)
+  done
+
+  echo "$snippets"
+}
+
+# =============================================================================
 # Notification helpers
 # =============================================================================
 
@@ -984,7 +1017,8 @@ send_notification() {
   # Send macOS notification via osascript heredoc (avoids shell quoting issues)
   # Run synchronously — backgrounding with & causes the process to be killed
   # when Claude Code terminates the hook's process group
-  osascript <<EOF 2>/dev/null
+  # Redirect BOTH stdout and stderr to prevent JSON output corruption
+  osascript <<EOF >/dev/null 2>&1
 display notification "${message}" with title "${title}" sound name "${sound}"
 EOF
 }
@@ -992,6 +1026,12 @@ EOF
 # --- HIGH SEVERITY: Stop or Critical Warning ---
 if [ ${#UNIQUE_HIGH[@]} -gt 0 ]; then
   HIGH_LIST=$(format_list "${UNIQUE_HIGH[@]}")
+
+  # Extract content snippets that triggered the match
+  ALL_PATTERNS=("${UNIQUE_HIGH[@]}")
+  [ ${#UNIQUE_MED[@]} -gt 0 ] && ALL_PATTERNS+=("${UNIQUE_MED[@]}")
+  SNIPPETS=$(extract_snippets "${ALL_PATTERNS[@]}")
+
   MSG="CRITICAL PROMPT INJECTION DETECTED [HIGH SEVERITY]: Definitive injection indicators found in web content: [${HIGH_LIST}]."
 
   if [ ${#UNIQUE_MED[@]} -gt 0 ]; then
@@ -1009,7 +1049,20 @@ if [ ${#UNIQUE_HIGH[@]} -gt 0 ]; then
   send_notification "HIGH" "☠️ Web Safety: CRITICAL [${TOOL_NAME}]" "☠️ Prompt injection detected! Content blocked." "Basso"
 
   if [ "$HIGH_SEVERITY_ACTION" = "stop" ]; then
-    STOP_REASON="Prompt injection detected [HIGH SEVERITY]: ${HIGH_LIST}. Content contained definitive injection indicators. Review the warning and decide how to proceed."
+    # Build stop reason with matched content snippets for user review
+    STOP_REASON="$(cat <<REASON
+═══ WEB SAFETY SCANNER: HIGH SEVERITY ═══
+Tool: ${TOOL_NAME}
+${TOOL_URL:+URL: ${TOOL_URL}}
+
+Matched patterns: [${HIGH_LIST}]
+
+Matched content from page:
+${SNIPPETS:-  (no content snippets extracted)}
+══════════════════════════════════════════
+Review the above. Type your message to continue or dismiss.
+REASON
+)"
     jq -n \
       --arg msg "$MSG" \
       --arg reason "$STOP_REASON" \
@@ -1017,10 +1070,15 @@ if [ ${#UNIQUE_HIGH[@]} -gt 0 ]; then
   else
     jq -n --arg msg "$MSG" '{"systemMessage": $msg}'
   fi
+  exit 0
 
 # --- MEDIUM SEVERITY: Pause for user confirmation ---
 elif [ ${#UNIQUE_MED[@]} -gt 0 ]; then
   MED_LIST=$(format_list "${UNIQUE_MED[@]}")
+
+  # Extract content snippets that triggered the match
+  SNIPPETS=$(extract_snippets "${UNIQUE_MED[@]}")
+
   MSG="PROMPT INJECTION WARNING [MEDIUM SEVERITY]: Suspicious patterns detected in web results: [${MED_LIST}]."
 
   if [ ${#UNIQUE_LOW[@]} -gt 0 ]; then
@@ -1033,11 +1091,24 @@ elif [ ${#UNIQUE_MED[@]} -gt 0 ]; then
   log_detection "MEDIUM" "$MED_LIST"
   send_notification "MEDIUM" "⚠️ Web Safety: WARNING [${TOOL_NAME}]" "⚠️ Suspicious patterns found. User confirmation needed." "Sosumi"
 
-  STOP_REASON="Suspicious patterns detected [MEDIUM SEVERITY]: ${MED_LIST}. Content may contain prompt injection. User confirmation required before proceeding."
+  STOP_REASON="$(cat <<REASON
+═══ WEB SAFETY SCANNER: MEDIUM SEVERITY ═══
+Tool: ${TOOL_NAME}
+${TOOL_URL:+URL: ${TOOL_URL}}
+
+Matched patterns: [${MED_LIST}]
+
+Matched content from page:
+${SNIPPETS:-  (no content snippets extracted)}
+════════════════════════════════════════════
+Review the above. Type your message to continue or dismiss.
+REASON
+)"
   jq -n \
     --arg msg "$MSG" \
     --arg reason "$STOP_REASON" \
     '{"systemMessage": $msg, "continue": false, "stopReason": $reason}'
+  exit 0
 
 # --- LOW SEVERITY: Notification only ---
 elif [ ${#UNIQUE_LOW[@]} -gt 0 ]; then
@@ -1048,4 +1119,5 @@ elif [ ${#UNIQUE_LOW[@]} -gt 0 ]; then
   send_notification "LOW" "Web Safety: Note [${TOOL_NAME}]" "Common hiding techniques detected." "Ping"
 
   jq -n --arg msg "$MSG" '{"systemMessage": $msg}'
+  exit 0
 fi

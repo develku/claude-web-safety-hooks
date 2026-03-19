@@ -26,6 +26,13 @@ After web content is returned, a shell script scans for **600+ prompt injection 
 | **MEDIUM** | **Pause** — Claude asks user to confirm | Sosumi | Instruction override, jailbreaks, social engineering, etc. |
 | **LOW** | **Note** — Mild note, Claude continues | Ping | HTML/CSS hiding, common markdown images, zero-width chars |
 
+### v4.1 Features (latest)
+
+- **Matched content snippets in stop reason** — when the scanner stops Claude, you now see the actual lines from the page that triggered each pattern match, so you can judge if it's a real attack or a security article
+- **Formatted stop reason display** — HIGH and MEDIUM detections show a structured block with tool name, URL, matched patterns, and content snippets
+- **Bug fix: `osascript` stdout leak** — notifications now redirect both stdout and stderr (`>/dev/null 2>&1`), preventing JSON output corruption that could cause `continue: false` to be silently ignored
+- **Bug fix: explicit `exit 0`** — every output path now exits cleanly, ensuring Claude Code always processes the JSON response
+
 ### v4.0 Features
 
 - **macOS desktop notifications** via `osascript` with per-severity sounds (Basso/Sosumi/Ping)
@@ -62,6 +69,26 @@ After web content is returned, a shell script scans for **600+ prompt injection 
 | HTML / CSS Hiding | LOW | `display:none`, `visibility:hidden`, `font-size:0`, `opacity:0` |
 | Markdown Images | LOW | `![img](http...`, `![image](http...` |
 | Invisible Unicode | LOW | Zero-width chars, bidi overrides, invisible fillers |
+
+### What You See When It Triggers
+
+When the scanner detects suspicious patterns, it stops Claude and shows you exactly what was matched:
+
+```
+═══ WEB SAFETY SCANNER: MEDIUM SEVERITY ═══
+Tool: WebFetch
+URL: https://example.com/security-blog
+
+Matched patterns: ["ignore previous instructions", "prompt injection"]
+
+Matched content from page:
+  → [ignore previous instructions]: researchers found that attacks use ignore previous instructions...
+  → [prompt injection]: ...a common prompt injection technique described in the OWASP Top 10...
+════════════════════════════════════════════
+Review the above. Type your message to continue or dismiss.
+```
+
+This lets you quickly judge whether the detection is a real attack or just a security article discussing these techniques.
 
 ## Covered Tools
 
