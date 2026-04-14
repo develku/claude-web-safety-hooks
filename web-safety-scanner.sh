@@ -1,5 +1,5 @@
 #!/bin/bash
-# Claude Code Web Safety Scanner v4.1
+# Claude Code Web Safety Scanner v4.2
 # Severity-tiered prompt injection detection for web content.
 #
 # Severity Levels:
@@ -69,28 +69,33 @@ SESSION_STATE="/tmp/web-safety-session-state"
 SESSION_WINDOW=300  # 5-minute sliding window
 
 # Read session hit count (prune entries older than SESSION_WINDOW)
+# Format: <timestamp> <tool> <url> <status>  where status is H (hit) or C (cleared)
+# Only H entries count toward escalation threshold
 SESSION_HITS=0
 if [ -f "$SESSION_STATE" ]; then
   NOW=$(date +%s)
-  # Keep only recent entries, count them
-  SESSION_HITS=$(awk -v cutoff=$((NOW - SESSION_WINDOW)) '$1 >= cutoff' "$SESSION_STATE" 2>/dev/null | wc -l | tr -d ' ')
-  # Prune old entries in place
+  # Keep only recent entries, count only H (non-cleared) hits for escalation
+  SESSION_HITS=$(awk -v cutoff=$((NOW - SESSION_WINDOW)) '$1 >= cutoff && $4 != "C"' "$SESSION_STATE" 2>/dev/null | wc -l | tr -d ' ')
+  # Prune old entries in place (keep all statuses for audit, just remove expired)
   awk -v cutoff=$((NOW - SESSION_WINDOW)) '$1 >= cutoff' "$SESSION_STATE" > "${SESSION_STATE}.tmp" 2>/dev/null && mv "${SESSION_STATE}.tmp" "$SESSION_STATE"
 fi
 
-# record_session_hit: append timestamp + tool + URL to session state
+# record_session_hit: append timestamp + tool + URL + status to session state
+# Usage: record_session_hit         → records as H (genuine hit)
+#        record_session_hit cleared  → records as C (auto-cleared FP)
 record_session_hit() {
-  echo "$(date +%s) $TOOL_NAME ${TOOL_URL:-no-url}" >> "$SESSION_STATE"
+  local status="${1:-H}"
+  echo "$(date +%s) $TOOL_NAME ${TOOL_URL:-no-url} $status" >> "$SESSION_STATE"
 }
 
-# Collect prior flagged tools for escalation context
+# Collect prior flagged tools for escalation context (H entries only)
 SESSION_FLAGGED_TOOLS=""
 if [ -f "$SESSION_STATE" ] && [ "$SESSION_HITS" -gt 0 ]; then
   NOW=$(date +%s)
-  SESSION_FLAGGED_TOOLS=$(awk -v cutoff=$((NOW - SESSION_WINDOW)) '$1 >= cutoff {print $2}' "$SESSION_STATE" 2>/dev/null | sort -u | tr '\n' ', ' | sed 's/,$//')
+  SESSION_FLAGGED_TOOLS=$(awk -v cutoff=$((NOW - SESSION_WINDOW)) '$1 >= cutoff && $4 != "C" {print $2}' "$SESSION_STATE" 2>/dev/null | sort -u | tr '\n' ', ' | sed 's/,$//')
 fi
 
-# ESCALATION: if 3+ tool calls triggered in 5 minutes, escalate MEDIUM→HIGH
+# ESCALATION: if 3+ non-cleared tool calls triggered in 5 minutes, escalate MEDIUM→HIGH
 ESCALATE_TO_HIGH=false
 if [ "$SESSION_HITS" -ge 2 ]; then
   ESCALATE_TO_HIGH=true
@@ -117,13 +122,10 @@ LOWER_OUTPUT=$(echo "$TOOL_OUTPUT" | tr '[:upper:]' '[:lower:]')
 # =============================================================================
 
 # View 1: Whitespace-collapsed — catches "i g n o r e  p r e v i o u s"
-# Removes single spaces between single chars, then collapses remaining whitespace
+# Uses perl for BSD-compatible single-spaced-letter merging (sed \b unsupported on macOS)
 COLLAPSED_OUTPUT=$(echo "$LOWER_OUTPUT" | \
-  sed 's/[[:space:]]\{1,\}/ /g' | \
-  sed 's/\b\([a-z]\) \([a-z]\) /\1\2/g' | \
-  sed 's/\b\([a-z]\) \([a-z]\) /\1\2/g' | \
-  sed 's/\b\([a-z]\) \([a-z]\) /\1\2/g' | \
-  sed 's/\b\([a-z]\) \([a-z]\)\b/\1\2/g')
+  tr -s '[:space:]' ' ' | \
+  perl -pe 'while(s/(?<![a-z])([a-z]) ([a-z]) /$1$2/g){}; s/(?<![a-z])([a-z]) ([a-z])(?![a-z])/$1$2/g')
 
 # View 2: HTML entity decoded — catches &#105;gnore, &lt;system&gt;, etc.
 HTML_DECODED_OUTPUT=$(echo "$LOWER_OUTPUT" | \
@@ -137,9 +139,23 @@ STRIPPED_OUTPUT=$(echo "$LOWER_OUTPUT" | sed 's/[._*|,;:!?+=#~\\/\-]//g' | sed '
 
 # View 4: Unicode confusable normalization — catches Cyrillic а→a, е→e, о→o etc.
 # Common Latin lookalikes from Cyrillic, Greek, and fullwidth ranges
+# Also strips combining diacritical marks (U+0300-036F) and variation selectors (U+FE00-FE0F)
 CONFUSABLE_OUTPUT=$(echo "$LOWER_OUTPUT" | \
   sed 's/а/a/g; s/е/e/g; s/о/o/g; s/р/p/g; s/с/c/g; s/у/y/g; s/х/x/g; s/і/i/g; s/ј/j/g; s/ѕ/s/g; s/ԁ/d/g; s/ɡ/g/g; s/ɑ/a/g; s/ε/e/g; s/ο/o/g; s/ν/v/g; s/ι/i/g; s/κ/k/g; s/τ/t/g; s/η/n/g' | \
-  sed 's/ａ/a/g; s/ｂ/b/g; s/ｃ/c/g; s/ｄ/d/g; s/ｅ/e/g; s/ｆ/f/g; s/ｇ/g/g; s/ｈ/h/g; s/ｉ/i/g; s/ｊ/j/g; s/ｋ/k/g; s/ｌ/l/g; s/ｍ/m/g; s/ｎ/n/g; s/ｏ/o/g; s/ｐ/p/g; s/ｑ/q/g; s/ｒ/r/g; s/ｓ/s/g; s/ｔ/t/g; s/ｕ/u/g; s/ｖ/v/g; s/ｗ/w/g; s/ｘ/x/g; s/ｙ/y/g; s/ｚ/z/g')
+  sed 's/ａ/a/g; s/ｂ/b/g; s/ｃ/c/g; s/ｄ/d/g; s/ｅ/e/g; s/ｆ/f/g; s/ｇ/g/g; s/ｈ/h/g; s/ｉ/i/g; s/ｊ/j/g; s/ｋ/k/g; s/ｌ/l/g; s/ｍ/m/g; s/ｎ/n/g; s/ｏ/o/g; s/ｐ/p/g; s/ｑ/q/g; s/ｒ/r/g; s/ｓ/s/g; s/ｔ/t/g; s/ｕ/u/g; s/ｖ/v/g; s/ｗ/w/g; s/ｘ/x/g; s/ｙ/y/g; s/ｚ/z/g' | \
+  perl -CSD -pe 's/[\x{0300}-\x{036F}\x{FE00}-\x{FE0F}]//g' 2>/dev/null)
+
+# View 5: Unicode whitespace normalized — catches NBSP, em space, ideographic space separators
+UNICODE_WS_OUTPUT=$(echo "$LOWER_OUTPUT" | \
+  perl -CSD -pe 's/[\x{00A0}\x{2002}\x{2003}\x{200A}\x{3000}]/ /g' 2>/dev/null | \
+  tr -s ' ')
+
+# View 6: HTML/XML tag stripped — catches "ign<span></span>ore prev<b></b>ious"
+TAG_STRIPPED_OUTPUT=$(echo "$LOWER_OUTPUT" | sed 's/<[^>]*>//g')
+
+# View 7: URL percent-decoded — catches "%69gnore %70revious %69nstructions"
+URL_DECODED_OUTPUT=$(echo "$LOWER_OUTPUT" | \
+  perl -pe 's/%([0-9a-fA-F]{2})/chr(hex($1))/ge')
 
 FOUND_HIGH=()
 FOUND_MEDIUM=()
@@ -898,6 +914,9 @@ echo "$COLLAPSED_OUTPUT" > "$TMP_DIR/collapsed.txt"
 echo "$HTML_DECODED_OUTPUT" > "$TMP_DIR/decoded.txt"
 echo "$STRIPPED_OUTPUT" > "$TMP_DIR/stripped.txt"
 echo "$CONFUSABLE_OUTPUT" > "$TMP_DIR/confusable.txt"
+echo "$UNICODE_WS_OUTPUT" > "$TMP_DIR/unicode_ws.txt"
+echo "$TAG_STRIPPED_OUTPUT" > "$TMP_DIR/tag_stripped.txt"
+echo "$URL_DECODED_OUTPUT" > "$TMP_DIR/url_decoded.txt"
 
 # Batch grep: 5 calls per severity (one per view), collect unique matched patterns
 # HIGH
@@ -907,6 +926,9 @@ HIGH_MATCHES=$( {
   grep -oFf "$TMP_DIR/high.pat" "$TMP_DIR/decoded.txt" 2>/dev/null
   grep -oFf "$TMP_DIR/high.pat" "$TMP_DIR/stripped.txt" 2>/dev/null
   grep -oFf "$TMP_DIR/high.pat" "$TMP_DIR/confusable.txt" 2>/dev/null
+  grep -oFf "$TMP_DIR/high.pat" "$TMP_DIR/unicode_ws.txt" 2>/dev/null
+  grep -oFf "$TMP_DIR/high.pat" "$TMP_DIR/tag_stripped.txt" 2>/dev/null
+  grep -oFf "$TMP_DIR/high.pat" "$TMP_DIR/url_decoded.txt" 2>/dev/null
 } | awk '!seen[$0]++' )
 
 # Map matched lowercase back to original casing
@@ -928,6 +950,9 @@ MED_MATCHES=$( {
   grep -oFf "$TMP_DIR/med.pat" "$TMP_DIR/decoded.txt" 2>/dev/null
   grep -oFf "$TMP_DIR/med.pat" "$TMP_DIR/stripped.txt" 2>/dev/null
   grep -oFf "$TMP_DIR/med.pat" "$TMP_DIR/confusable.txt" 2>/dev/null
+  grep -oFf "$TMP_DIR/med.pat" "$TMP_DIR/unicode_ws.txt" 2>/dev/null
+  grep -oFf "$TMP_DIR/med.pat" "$TMP_DIR/tag_stripped.txt" 2>/dev/null
+  grep -oFf "$TMP_DIR/med.pat" "$TMP_DIR/url_decoded.txt" 2>/dev/null
 } | awk '!seen[$0]++' )
 
 ALL_MED_PATTERNS=( \
@@ -972,39 +997,45 @@ done <<< "$LOW_MATCHES"
 # Unicode / Invisible Character Detection (severity varies)
 # =============================================================================
 
+# Unicode detection uses perl -CSD for macOS compatibility (BSD grep lacks -P flag)
 # HIGH: Unicode tag characters (invisible ASCII encoding)
-if echo "$TOOL_OUTPUT" | grep -qP '[\x{E0000}-\x{E007F}]' 2>/dev/null; then
+if echo "$TOOL_OUTPUT" | perl -CSD -ne '$f=1 if /[\x{E0000}-\x{E007F}]/; END{exit($f?0:1)}' 2>/dev/null; then
   FOUND_HIGH+=("unicode tag characters (invisible ASCII encoding)")
 fi
 
 # MEDIUM: Mixed Cyrillic/Latin homoglyphs
-if echo "$TOOL_OUTPUT" | grep -qP '[a-zA-Z]+[\x{0400}-\x{04FF}]|[\x{0400}-\x{04FF}]+[a-zA-Z]' 2>/dev/null; then
+if echo "$TOOL_OUTPUT" | perl -CSD -ne '$f=1 if /[a-zA-Z]+[\x{0400}-\x{04FF}]|[\x{0400}-\x{04FF}]+[a-zA-Z]/; END{exit($f?0:1)}' 2>/dev/null; then
   FOUND_MEDIUM+=("mixed Cyrillic/Latin script (possible homoglyph attack)")
 fi
 
 # LOW: Zero-width characters
-if echo "$TOOL_OUTPUT" | grep -qP '[\x{200B}\x{200C}\x{200D}\x{FEFF}\x{00AD}]' 2>/dev/null; then
+if echo "$TOOL_OUTPUT" | perl -CSD -ne '$f=1 if /[\x{200B}\x{200C}\x{200D}\x{FEFF}\x{00AD}]/; END{exit($f?0:1)}' 2>/dev/null; then
   FOUND_LOW+=("zero-width/invisible characters")
 fi
 
 # LOW: Bidirectional override/isolate characters
-if echo "$TOOL_OUTPUT" | grep -qP '[\x{202A}-\x{202E}\x{2066}-\x{2069}]' 2>/dev/null; then
+if echo "$TOOL_OUTPUT" | perl -CSD -ne '$f=1 if /[\x{202A}-\x{202E}\x{2066}-\x{2069}]/; END{exit($f?0:1)}' 2>/dev/null; then
   FOUND_LOW+=("bidirectional override/isolate characters")
 fi
 
 # LOW: Invisible function/annotation characters
-if echo "$TOOL_OUTPUT" | grep -qP '[\x{2060}-\x{2064}\x{FFF9}-\x{FFFB}\x{FFFC}]' 2>/dev/null; then
+if echo "$TOOL_OUTPUT" | perl -CSD -ne '$f=1 if /[\x{2060}-\x{2064}\x{FFF9}-\x{FFFB}\x{FFFC}]/; END{exit($f?0:1)}' 2>/dev/null; then
   FOUND_LOW+=("invisible function/annotation characters")
 fi
 
 # LOW: Invisible filler characters (mongolian/braille/hangul)
-if echo "$TOOL_OUTPUT" | grep -qP '[\x{180E}\x{2800}\x{3164}\x{FFA0}]' 2>/dev/null; then
+if echo "$TOOL_OUTPUT" | perl -CSD -ne '$f=1 if /[\x{180E}\x{2800}\x{3164}\x{FFA0}]/; END{exit($f?0:1)}' 2>/dev/null; then
   FOUND_LOW+=("invisible filler characters (mongolian/braille/hangul)")
 fi
 
 # LOW: Unicode line/paragraph separators
-if echo "$TOOL_OUTPUT" | grep -qP '[\x{2028}\x{2029}]' 2>/dev/null; then
+if echo "$TOOL_OUTPUT" | perl -CSD -ne '$f=1 if /[\x{2028}\x{2029}]/; END{exit($f?0:1)}' 2>/dev/null; then
   FOUND_LOW+=("unicode line/paragraph separators")
+fi
+
+# LOW: Variation selectors (can be inserted between chars to break pattern matching)
+if echo "$TOOL_OUTPUT" | perl -CSD -ne '$f=1 if /[\x{FE00}-\x{FE0F}\x{E0100}-\x{E01EF}]/; END{exit($f?0:1)}' 2>/dev/null; then
+  FOUND_LOW+=("variation selectors (pattern-breaking invisible chars)")
 fi
 
 # =============================================================================
@@ -1075,10 +1106,12 @@ if [ "$HIGH_COUNT" -gt 0 ]; then
 fi
 
 UNIQUE_MED=()
+ALL_UNIQUE_MED=()  # Full set (no cap) for sanitization; UNIQUE_MED is display-only (head -5)
 if [ "$MED_COUNT" -gt 0 ]; then
   while IFS= read -r line; do
-    [ -n "$line" ] && UNIQUE_MED+=("$line")
-  done < <(printf '%s\n' "${FOUND_MEDIUM[@]}" | awk '!seen[$0]++' | head -5)
+    [ -n "$line" ] && ALL_UNIQUE_MED+=("$line")
+  done < <(printf '%s\n' "${FOUND_MEDIUM[@]}" | awk '!seen[$0]++')
+  UNIQUE_MED=("${ALL_UNIQUE_MED[@]:0:5}")
 fi
 
 UNIQUE_LOW=()
@@ -1086,6 +1119,84 @@ if [ "$LOW_COUNT" -gt 0 ]; then
   while IFS= read -r line; do
     [ -n "$line" ] && UNIQUE_LOW+=("$line")
   done < <(printf '%s\n' "${FOUND_LOW[@]}" | awk '!seen[$0]++' | head -5)
+fi
+
+# =============================================================================
+# Structural context verification for MED_GENERIC_DELIMITERS (v4.2)
+# Auto-clears MEDIUM matches that are inside code fences, YAML strings, etc.
+# Only applies to MED_GENERIC_DELIMITERS patterns. All other MEDIUM patterns
+# remain human-reviewed. Fail-closed: errors/timeouts → keep the match.
+# Disable with: VERIFY_CONTEXT_ENABLED=false
+# =============================================================================
+VERIFY_CONTEXT_ENABLED="${VERIFY_CONTEXT_ENABLED:-true}"
+VERIFIER_SCRIPT="$(dirname "$0")/web-safety-verify-context.sh"
+VERIFIER_TIMEOUT=0.5  # 500ms fail-closed timeout
+
+if [ "$VERIFY_CONTEXT_ENABLED" = "true" ] && [ ${#UNIQUE_MED[@]} -gt 0 ] && [ ${#UNIQUE_HIGH[@]} -eq 0 ] && [ -x "$VERIFIER_SCRIPT" ]; then
+  # Build set of verifiable patterns (MED_GENERIC_DELIMITERS only)
+  VERIFIABLE_PATTERNS=()
+  for p in "${MED_GENERIC_DELIMITERS[@]}"; do
+    VERIFIABLE_PATTERNS+=("$(echo "$p" | tr '[:upper:]' '[:lower:]')")
+  done
+
+  VERIFIED_MED=()
+  VERIFIED_ALL_MED=()
+  CLEARED_PATTERNS=()
+
+  for p in "${ALL_UNIQUE_MED[@]}"; do
+    lc_p=$(echo "$p" | tr '[:upper:]' '[:lower:]')
+
+    # Check if this pattern is in the verifiable set
+    IS_VERIFIABLE=false
+    for vp in "${VERIFIABLE_PATTERNS[@]}"; do
+      if [ "$lc_p" = "$vp" ]; then
+        IS_VERIFIABLE=true
+        break
+      fi
+    done
+
+    if [ "$IS_VERIFIABLE" = "true" ]; then
+      # Find the line number of this pattern in the original TOOL_OUTPUT
+      LINE_NUM=$(echo "$TOOL_OUTPUT" | grep -inF -- "$lc_p" | head -1 | cut -d: -f1)
+      if [ -n "$LINE_NUM" ]; then
+        # Call the verifier with timeout (fail-closed)
+        # macOS lacks `timeout` — use perl alarm for SIGALRM-based timeout
+        VERDICT=$(echo "$TOOL_OUTPUT" | \
+          VERIFY_PATTERN="$lc_p" VERIFY_LINE_NUM="$LINE_NUM" \
+          perl -e 'alarm 1; exec @ARGV' "$VERIFIER_SCRIPT" 2>/dev/null || \
+          echo '{"verdict":"genuine","reason":"verifier timeout or error"}')
+
+        VERDICT_VALUE=$(echo "$VERDICT" | jq -r '.verdict // "genuine"' 2>/dev/null || echo "genuine")
+        VERDICT_REASON=$(echo "$VERDICT" | jq -r '.reason // "unknown"' 2>/dev/null || echo "unknown")
+
+        if [ "$VERDICT_VALUE" = "fp" ]; then
+          CLEARED_PATTERNS+=("$p")
+          # Record as cleared in session state (C flag — doesn't count toward escalation)
+          record_session_hit cleared
+          # Log the clearance (content hash for audit trail)
+          CONTENT_HASH=$(echo "$TOOL_OUTPUT" | shasum -a 256 | cut -d' ' -f1)
+          echo "[$(date '+%Y-%m-%d %H:%M:%S')] [CLEARED] tool=${TOOL_NAME} ${TOOL_URL:+url=${TOOL_URL} }pattern=\"$p\" reason=\"$VERDICT_REASON\" hash=${CONTENT_HASH:0:12}" >> "$LOG_FILE"
+          continue  # Skip this pattern — verified as FP
+        fi
+      fi
+    fi
+
+    # Pattern not verifiable, or verified as genuine — keep it
+    VERIFIED_ALL_MED+=("$p")
+  done
+
+  # Replace the arrays with verified results
+  ALL_UNIQUE_MED=("${VERIFIED_ALL_MED[@]}")
+  UNIQUE_MED=("${VERIFIED_ALL_MED[@]:0:5}")
+
+  # If all MEDIUM matches were cleared, recount
+  if [ ${#ALL_UNIQUE_MED[@]} -eq 0 ]; then
+    MED_COUNT=0
+    TOTAL=$((HIGH_COUNT + MED_COUNT + LOW_COUNT))
+    if [ "$TOTAL" -eq 0 ]; then
+      exit 0
+    fi
+  fi
 fi
 
 # Format pattern list for display
@@ -1172,12 +1283,15 @@ send_notification() {
   # Update rate limit timestamp
   date +%s > "$RATE_LIMIT_FILE"
 
-  # Send macOS notification via osascript heredoc (avoids shell quoting issues)
+  # Send macOS notification via osascript heredoc
+  # Sanitize inputs: strip double quotes to prevent AppleScript injection
+  local safe_title="${title//\"/ }"
+  local safe_message="${message//\"/ }"
   # Run synchronously — backgrounding with & causes the process to be killed
   # when Claude Code terminates the hook's process group
   # Redirect BOTH stdout and stderr to prevent JSON output corruption
   osascript <<EOF >/dev/null 2>&1
-display notification "${message}" with title "${title}" sound name "${sound}"
+display notification "${safe_message}" with title "${safe_title}" sound name "${sound}"
 EOF
 }
 
@@ -1189,7 +1303,7 @@ sanitize_content() {
   local content_hash=$(echo "$TOOL_OUTPUT" | shasum -a 256 | cut -d' ' -f1)
 
   # Log original content hash for forensic audit
-  echo "[$(date '+%Y-%m-%d %H:%M:%S')] [SANITIZE] severity=$1 hash=${content_hash} lines=${total_lines} tool=${TOOL_NAME}" >> "$LOG"
+  echo "[$(date '+%Y-%m-%d %H:%M:%S')] [SANITIZE] severity=$1 hash=${content_hash} lines=${total_lines} tool=${TOOL_NAME}" >> "$LOG_FILE"
 
   if [ "$1" = "high" ]; then
     cat <<MSG
@@ -1213,7 +1327,7 @@ MSG
     fi
     local lc_line=$(echo "$line" | tr '[:upper:]' '[:lower:]')
     local matched_pattern=""
-    for p in "${UNIQUE_MED[@]}"; do
+    for p in "${ALL_UNIQUE_MED[@]}"; do
       if echo "$lc_line" | grep -qF -- "$(echo "$p" | tr '[:upper:]' '[:lower:]')"; then
         matched_pattern="$p"
         break

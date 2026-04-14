@@ -32,7 +32,7 @@ Blocked URL categories:
 
 ### Layer 2: PostToolUse — Severity-Tiered Injection Scanner
 
-After web content is returned, `web-safety-scanner.sh` scans for **600+ prompt injection patterns** across 20+ categories with **5 evasion-resistant views** and responds based on severity:
+After web content is returned, `web-safety-scanner.sh` scans for **600+ prompt injection patterns** across 20+ categories with **8 evasion-resistant views** and responds based on severity:
 
 | Severity | Action | Sound (macOS) | When |
 |---|---|---|---|
@@ -57,7 +57,38 @@ The scanner tracks injection signals across multiple tool calls in a 5-minute sl
 
 This catches **distributed injection attacks** where payloads are split across multiple web fetches.
 
-### v5.1 Features (latest)
+### Layer 5: Structural Context Verification (v4.2+)
+
+For patterns that commonly appear in legitimate technical content (LLM documentation, agent configs, API examples), the scanner runs an **automated structural context check** before interrupting the user:
+
+1. **Checks if the match is inside** a code fence, YAML string, JSON literal, HTML `<code>`/`<pre>` block, or markdown inline code
+2. **Co-location guard**: Even inside structural context, clearance is denied if the same line contains injection keywords (`ignore`, `override`, `bypass`, etc.)
+3. **Auto-clears confirmed false positives** — no user interruption, with full audit logging
+4. **Only applies to `MED_GENERIC_DELIMITERS`** patterns (`assistant:`, `human:`, `system: you are`, `<system>`, `[INST]`, etc.) — all other MEDIUM patterns remain human-reviewed
+5. **Purely structural** (regex/grep) — no LLM involvement, deterministic, non-injectable, sub-millisecond
+
+This reduces false positive friction when fetching LLM documentation, agent definitions, and security articles, while maintaining full protection against actual injections.
+
+| Pattern in... | Verdict | Example |
+|---|---|---|
+| Code fence | Auto-cleared | `` ```yaml\nassistant: responds to code review\n``` `` |
+| Code fence + injection keywords | **Blocked** | `` ```yaml\nassistant: ignore previous instructions\n``` `` |
+| YAML string literal | Auto-cleared | `description: "the assistant: helps users"` |
+| JSON string | Auto-cleared | `{"role": "assistant: responds to queries"}` |
+| Standalone line | **Blocked** | `assistant: How can I help you?` |
+
+### v4.2 Features (latest)
+
+- **Structural context verification** for `MED_GENERIC_DELIMITERS` false positives (Layer 5)
+- **New `web-safety-verify-context.sh`** — standalone verifier with code fence, YAML, JSON, HTML, inline code detection
+- **Co-location guard** — denies auto-clearance when injection keywords appear on the same line
+- **SESSION_STATE schema upgrade** — `H` (hit) vs `C` (cleared) status, only genuine hits count toward escalation
+- **`CLEARED` audit log entries** — pattern, reason, and content hash for forensic trail
+- **`VERIFY_CONTEXT_ENABLED` env var** — set to `false` for instant rollback to v5.1 behavior
+- **8 evasion-resistant content views** (added Unicode whitespace, tag-stripped, and URL percent-decoded views)
+- **macOS-compatible timeout** — uses `perl -e 'alarm 1; exec @ARGV'` instead of `timeout` (not available on macOS)
+
+### v5.1 Features
 
 - **5 evasion-resistant content views** — all scanned in parallel:
   - Original lowercase
@@ -186,7 +217,8 @@ Both hooks trigger on all web-content-fetching tools via wildcard matchers:
 mkdir -p ~/.claude/hooks
 curl -sSL https://raw.githubusercontent.com/develku/claude-web-safety-hooks/main/web-safety-scanner.sh -o ~/.claude/hooks/web-safety-scanner.sh
 curl -sSL https://raw.githubusercontent.com/develku/claude-web-safety-hooks/main/web-safety-approve.sh -o ~/.claude/hooks/web-safety-approve.sh
-chmod +x ~/.claude/hooks/web-safety-scanner.sh ~/.claude/hooks/web-safety-approve.sh
+curl -sSL https://raw.githubusercontent.com/develku/claude-web-safety-hooks/main/web-safety-verify-context.sh -o ~/.claude/hooks/web-safety-verify-context.sh
+chmod +x ~/.claude/hooks/web-safety-scanner.sh ~/.claude/hooks/web-safety-approve.sh ~/.claude/hooks/web-safety-verify-context.sh
 ```
 
 Or clone the repo:
@@ -195,7 +227,8 @@ Or clone the repo:
 git clone https://github.com/develku/claude-web-safety-hooks.git
 cp claude-web-safety-hooks/web-safety-scanner.sh ~/.claude/hooks/
 cp claude-web-safety-hooks/web-safety-approve.sh ~/.claude/hooks/
-chmod +x ~/.claude/hooks/web-safety-scanner.sh ~/.claude/hooks/web-safety-approve.sh
+cp claude-web-safety-hooks/web-safety-verify-context.sh ~/.claude/hooks/
+chmod +x ~/.claude/hooks/web-safety-scanner.sh ~/.claude/hooks/web-safety-approve.sh ~/.claude/hooks/web-safety-verify-context.sh
 ```
 
 ### 2. Add hooks to `~/.claude/settings.json`
@@ -271,7 +304,7 @@ User asks to search web
        |
        v
   PostToolUse: web-safety-scanner.sh
-  --> 5 evasion views generated (lowercase, collapsed, decoded, stripped, confusable)
+  --> 8 evasion views generated (lowercase, collapsed, decoded, stripped, confusable, unicode-ws, tag-stripped, url-decoded)
   --> Batch pattern matching via grep -Ff (600+ patterns, 16ms)
   --> Cross-tool correlation check (5-min sliding window)
        |
@@ -279,8 +312,12 @@ User asks to search web
        |
        +---> HIGH: Content REDACTED + Claude STOPS + notification
        |
-       +---> MEDIUM: Lines REDACTED + Claude PAUSES + notification
-       |     (auto-escalates to HIGH if 3+ tools flagged in 5 min)
+       +---> MEDIUM (MED_GENERIC_DELIMITERS):
+       |     --> Structural context verification (web-safety-verify-context.sh)
+       |     --> Inside code fence/YAML/JSON? Auto-cleared (logged as CLEARED)
+       |     --> Co-located with injection keywords? Still BLOCKED
+       |     --> All other MEDIUM patterns: Claude PAUSES + notification
+       |     (auto-escalates to HIGH if 3+ genuine hits in 5 min)
        |
        +---> LOW: Mild note + notification
        |
@@ -299,6 +336,7 @@ All detections are logged to `~/.claude/hooks/web-safety.log`:
 [2026-03-23 14:31:15] [SANITIZE] severity=medium hash=f69aaacbcd0f... lines=150 tool=Exa
 [2026-03-23 14:32:00] [ESCALATED] session_hits=3 prior_tools=WebFetch,Exa patterns="you are now"
 [2026-03-23 14:32:00] [PRE-BLOCK] url=data:text/html;base64,... reason=dangerous URI scheme
+[2026-03-23 14:33:00] [CLEARED] tool=WebFetch url=https://github.com/... pattern="assistant: " reason="inside code_fence" hash=8360aceb695f
 ```
 
 ## Performance
@@ -308,11 +346,12 @@ The scanner runs as a **pure shell process** — no LLM calls, zero API tokens.
 | Component | Time | Token Cost |
 |---|---|---|
 | URL pre-screening | <1ms | 0 |
-| Content view generation (5 views) | ~2ms | 0 |
+| Content view generation (8 views) | ~3ms | 0 |
 | Batch pattern matching (grep -Ff) | ~10ms | 0 |
+| Structural context verification | ~2ms | 0 |
 | Cross-tool correlation | <1ms | 0 |
 | Content sanitization | ~3ms | 0 |
-| **Total per web fetch** | **~16ms** | **~80 tokens** (systemMessage only) |
+| **Total per web fetch** | **~19ms** | **~80 tokens** (systemMessage only) |
 
 Benchmarked on 50KB web pages with Apple Silicon.
 
@@ -364,6 +403,16 @@ Append to both matchers in your `settings.json`:
 
 ```json
 "matcher": "...existing...|mcp__yournewserver.*"
+```
+
+### Structural context verification
+
+```bash
+# Disable auto-verification (revert to v5.1 behavior):
+VERIFY_CONTEXT_ENABLED=false
+
+# The verifier script must be in the same directory as the scanner:
+# ~/.claude/hooks/web-safety-verify-context.sh
 ```
 
 ### Notification rate limiting
