@@ -7,10 +7,7 @@
   "plugins": [
     {
       "name": "web-safety",
-      "source": {
-        "source": "github",
-        "repo": "develku/claude-web-safety-hooks"
-      },
+      "source": "./",
       "description": "Prompt-injection defense hooks for Claude Code"
     }
   ]

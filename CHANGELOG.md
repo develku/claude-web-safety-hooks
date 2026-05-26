@@ -2,6 +2,12 @@
 
 All notable changes to this project. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [6.2.2] — 2026-05-26
+
+### Fixed
+
+- **`marketplace.json` source format** — both `"."` (v6.0–6.2) and `{"source": "github"}` (v6.2.1) failed install on Claude Code 2.1.150. Empirical inspection of three working community marketplaces (impeccable, openai-codex, anthropics' own claude-plugins-official) confirms the actually-supported formats are: bare relative-path string (`"./"`, `"./plugins/foo"`) and the `git-subdir` object. Switched to `"source": "./"` — the same form impeccable uses for a single-plugin-at-repo-root layout.
+
 ## [6.2.1] — 2026-05-26
 
 ### Fixed
