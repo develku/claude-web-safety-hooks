@@ -1211,9 +1211,15 @@ if [ "$TOTAL" -eq 0 ] && [ "$E8_ACTIVE" = "false" ]; then
     ' | sort -u > "$SUSPICIOUS_AFFIX_FILE"
 
   E8_ORDERING_REGEX='(part [0-9]+( of |/)[0-9]+|step [0-9]+|segment [a-z]\b|page [0-9]+ of [0-9]+|[0-9]+편)'
+  # Trigger check considers both the raw lowercased input AND the confusable-
+  # normalized view (already produced by generate_views earlier) so Cyrillic/
+  # Greek/fullwidth letter splits at fragment boundaries don't slip past the
+  # storage decision. Per v6.1+ stress test reassembly-confusable-bridge.
   if printf '%s' "$LOWER_OUTPUT" | grep -qiE -- "$E8_ORDERING_REGEX" \
      || printf '%s' "$LOWER_OUTPUT" | grep -qiFf "$SUSPICIOUS_TOKENS_FILE" 2>/dev/null \
-     || printf '%s' "$LOWER_OUTPUT" | grep -qiFf "$SUSPICIOUS_AFFIX_FILE" 2>/dev/null; then
+     || printf '%s' "$LOWER_OUTPUT" | grep -qiFf "$SUSPICIOUS_AFFIX_FILE" 2>/dev/null \
+     || ([ -f "$TMP_DIR/confusable.txt" ] && grep -qiFf "$SUSPICIOUS_TOKENS_FILE" "$TMP_DIR/confusable.txt" 2>/dev/null) \
+     || ([ -f "$TMP_DIR/confusable.txt" ] && grep -qiFf "$SUSPICIOUS_AFFIX_FILE" "$TMP_DIR/confusable.txt" 2>/dev/null); then
     E8_ACTIVE=true
   fi
 fi
@@ -1552,6 +1558,8 @@ e8_unlock() { rmdir "${SESSION_FRAGMENTS}.lock" 2>/dev/null; }
 # Test if input contains a suspicious indicator (substring or ordering token).
 # Used to decide whether to store + reassemble. v6.1 also checks the affix
 # index to catch fragments that are AFFIX-ONLY (e.g., "obe" without "obey").
+# Also consults the confusable-normalized per-fetch view so Cyrillic/Greek/
+# fullwidth letter splits don't slip past the storage gate.
 e8_has_indicator() {
   local content="$1"
   if printf '%s' "$content" | grep -qiE -- "$E8_ORDERING_REGEX"; then
@@ -1562,6 +1570,14 @@ e8_has_indicator() {
   fi
   if printf '%s' "$content" | grep -qiFf "$SUSPICIOUS_AFFIX_FILE" 2>/dev/null; then
     return 0
+  fi
+  if [ -f "$TMP_DIR/confusable.txt" ]; then
+    if grep -qiFf "$SUSPICIOUS_TOKENS_FILE" "$TMP_DIR/confusable.txt" 2>/dev/null; then
+      return 0
+    fi
+    if grep -qiFf "$SUSPICIOUS_AFFIX_FILE" "$TMP_DIR/confusable.txt" 2>/dev/null; then
+      return 0
+    fi
   fi
   return 1
 }
@@ -1577,9 +1593,14 @@ fi
 
 # Store excerpt of current fetch if eligible.
 if [ "$e8_should_store" = "true" ]; then
-  # Excerpt: take first E8_EXCERPT_SIZE bytes of lowered content (post-normalization
-  # would lose the most signal-dense form; lower preserves enough for reassembly grep)
-  E8_EXCERPT=$(printf '%s' "$LOWER_OUTPUT" | head -c "$E8_EXCERPT_SIZE")
+  # Excerpt: take first E8_EXCERPT_SIZE bytes of lowered content, then apply
+  # confusable-letter normalization (Cyrillic а→a, fullwidth ｉ→i, Greek ε→e,
+  # etc.) so cross-fragment boundary computations and concat grep work
+  # correctly when attackers split at letters spelled with confusable
+  # characters. Per v6.1+ stress test reassembly-confusable-bridge.
+  E8_EXCERPT=$(printf '%s' "$LOWER_OUTPUT" | head -c "$E8_EXCERPT_SIZE" | \
+    sed 's/а/a/g; s/е/e/g; s/о/o/g; s/р/p/g; s/с/c/g; s/у/y/g; s/х/x/g; s/і/i/g; s/ј/j/g; s/ѕ/s/g; s/ԁ/d/g; s/ɡ/g/g; s/ɑ/a/g; s/ε/e/g; s/ο/o/g; s/ν/v/g; s/ι/i/g; s/κ/k/g; s/τ/t/g; s/η/n/g' | \
+    sed 's/ａ/a/g; s/ｂ/b/g; s/ｃ/c/g; s/ｄ/d/g; s/ｅ/e/g; s/ｆ/f/g; s/ｇ/g/g; s/ｈ/h/g; s/ｉ/i/g; s/ｊ/j/g; s/ｋ/k/g; s/ｌ/l/g; s/ｍ/m/g; s/ｎ/n/g; s/ｏ/o/g; s/ｐ/p/g; s/ｑ/q/g; s/ｒ/r/g; s/ｓ/s/g; s/ｔ/t/g; s/ｕ/u/g; s/ｖ/v/g; s/ｗ/w/g; s/ｘ/x/g; s/ｙ/y/g; s/ｚ/z/g')
   # Plain base64 (single-line, no padding stripped) — TSV-safe since
   # +, /, = don't conflict with tab. Avoid tr '+/' '-_' which BSD tr
   # parses as an illegal option ("-_") on macOS.

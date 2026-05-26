@@ -2,6 +2,23 @@
 
 All notable changes to this project. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [6.1.1] — 2026-05-26
+
+Stress test follow-up. Three adversarial scenarios designed; two passed cleanly (confirmed FP control + multi-pattern reassembly), one exposed a real gap that's now fixed.
+
+### Fixed
+
+- **Confusable-letter splits at fragment boundaries were undetected.** Stress test `reassembly-confusable-bridge` (Cyrillic `іgn` + `ore previous instructions`) showed that the storage trigger was using literal grep against the SUSPICIOUS_TOKENS/AFFIX files, so Cyrillic/Greek/fullwidth letter splits at the fragment boundary bypassed both:
+  1. **Storage trigger** — now also consults the confusable-normalized per-fetch view file (`$TMP_DIR/confusable.txt`), produced by the existing `generate_views()` pipeline. No new file generation needed.
+  2. **Excerpt content** — confusable normalization (Cyrillic а→a, fullwidth ｉ→i, Greek ε→e, ɡ→g, etc.) is now applied to the stored excerpt BEFORE base64 encoding. Smart-join boundary computations and concat grep see Latin letters and bridge correctly.
+
+### Added
+
+- **3 stress test scenarios**:
+  - `legit-bridge-benign` — smart-join bridges `fol` + `low` into `follow`, but no MED pattern matches → no escalation (FP control validated).
+  - `reassembly-multi-pattern` — single 3-fragment sequence triggers two distinct reassembled MED patterns (`ignore previous instructions` + `disregard the above`).
+  - `reassembly-confusable-bridge` — covers the fix described above.
+
 ## [6.1.0] — 2026-05-26
 
 Closes the two known limitations documented at v6.0 release: letter-boundary
