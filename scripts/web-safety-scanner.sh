@@ -57,8 +57,10 @@ HIGH_SEVERITY_ACTION="${HIGH_SEVERITY_ACTION:-stop}"
 # =============================================================================
 # Path resolution
 # =============================================================================
-# HOOKS_DIR — where sibling scripts live (verifier). Works in plugin install
-# (${CLAUDE_PLUGIN_ROOT}/scripts) and legacy manual install ($(dirname "$0")).
+# HOOKS_DIR — where sibling scripts live (verifier). Resolves from
+# ${CLAUDE_PLUGIN_ROOT}/scripts in normal plugin runs; $(dirname "$0") is a
+# defensive fallback that lets the test harness and standalone invocations
+# work without needing CLAUDE_PLUGIN_ROOT set in the environment.
 HOOKS_DIR="${CLAUDE_PLUGIN_ROOT:+${CLAUDE_PLUGIN_ROOT}/scripts}"
 HOOKS_DIR="${HOOKS_DIR:-$(cd "$(dirname "$0")" && pwd)}"
 

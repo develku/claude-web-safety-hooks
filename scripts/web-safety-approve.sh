@@ -7,7 +7,7 @@ INPUT=$(cat)
 URL=$(echo "$INPUT" | jq -r '.tool_input.url // .tool_input.URL // .tool_input.query // ""' 2>/dev/null)
 
 # User-state directory (logs, blocklist, allowlist). Persists across plugin updates.
-# Override with WEB_SAFETY_CONFIG_DIR. Defaults to legacy ~/.claude/hooks path.
+# Override with WEB_SAFETY_CONFIG_DIR. Defaults to ~/.claude/hooks.
 CONFIG_DIR="${WEB_SAFETY_CONFIG_DIR:-$HOME/.claude/hooks}"
 
 # Phase 1: URL pre-screening (defense-in-depth with logging + notification)

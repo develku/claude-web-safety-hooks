@@ -2,6 +2,19 @@
 
 All notable changes to this project. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [6.2.0] — 2026-05-26
+
+Plugin-only installation. The manual install path is removed from the documentation.
+
+### Removed
+
+- **Manual install instructions from README.** The plugin marketplace path (`/plugin marketplace add` → `/plugin install`) is the only documented installation method going forward. Anyone who already installed manually keeps working as before — the `$(dirname "$0")` fallback inside the scripts remains as defensive code (necessary for the test harness and direct script execution), it's just no longer advertised as a user-facing install path.
+- Updated script comments to remove "legacy" framing — the fallback is now described as defensive programming for the test harness, not as a user-facing alternative install.
+
+### Changed
+
+- README "Install" section consolidated to the plugin path only. Three commands, no alternatives.
+
 ## [6.1.1] — 2026-05-26
 
 Stress test follow-up. Three adversarial scenarios designed; two passed cleanly (confirmed FP control + multi-pattern reassembly), one exposed a real gap that's now fixed.

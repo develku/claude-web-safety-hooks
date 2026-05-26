@@ -20,7 +20,7 @@ Five layers, each documented in [docs/patterns.md](docs/patterns.md):
 | **4. Cross-tool correlation + reassembly** | PostToolUse | 5-min window; 3+ flagged tools auto-escalate MEDIUM → HIGH. **v6.0+ also detects payloads split across multiple fetches** (`Part 1/3: ignore` + `Part 2/3: previous` + `Part 3/3: instructions` → reassembled match) |
 | **5. Structural verification** | PostToolUse | Code-fence / YAML / JSON / HTML-code / inline-code aware — clears false positives like `assistant:` inside doc snippets without bothering the user |
 
-## Install (plugin)
+## Install
 
 ```
 /plugin marketplace add develku/claude-web-safety-hooks
@@ -29,15 +29,6 @@ Five layers, each documented in [docs/patterns.md](docs/patterns.md):
 ```
 
 That's it. The matchers cover `WebFetch`, `WebSearch`, and a wide set of MCP web tools (Playwright, Puppeteer, Firecrawl, Exa, Context7, MCP Docker variants).
-
-### Install (manual, legacy)
-
-```bash
-git clone https://github.com/develku/claude-web-safety-hooks.git ~/.claude/hooks/web-safety
-ln -s ~/.claude/hooks/web-safety/scripts/*.sh ~/.claude/hooks/
-```
-
-Then copy the matchers from [`hooks/hooks.json`](hooks/hooks.json) into your `~/.claude/settings.json` and replace `${CLAUDE_PLUGIN_ROOT}/scripts/` with `~/.claude/hooks/`.
 
 ## Quick start
 
@@ -68,7 +59,7 @@ See [docs/tuning.md](docs/tuning.md) for environment variables, severity tuning,
 
 ## Versions
 
-See [CHANGELOG.md](CHANGELOG.md) for the per-version feature list. Latest is **6.1.0** — closes both v6.0 known limitations: letter-boundary splits via smart-join concat, affix-only fragments via 3-char affix index. Previous: **6.0.0** — cross-call payload reassembly (E8). **5.2.0** — plugin packaging, portability refactor, URL allowlist, paths-with-spaces fix.
+See [CHANGELOG.md](CHANGELOG.md) for the per-version feature list. Latest is **6.2.0** — plugin-only installation; manual install path removed. Previous: **6.1.1** — confusable-letter bridge fix from stress testing. **6.1.0** — letter-boundary + affix-only limitation closures. **6.0.0** — cross-call payload reassembly (E8).
 
 ## Tests
 
@@ -76,7 +67,7 @@ See [CHANGELOG.md](CHANGELOG.md) for the per-version feature list. Latest is **6
 ./tests/run-tests.sh
 ```
 
-31 tests (25 single-fetch + 6 multi-fetch sequences for cross-call reassembly) across HIGH/MEDIUM/LOW/legit/reassembly buckets, covering all 8 evasion views, Layer-5 false-positive guards, multi-pattern HIGH combinations, ordering-token reorder attacks, cross-session isolation, letter-boundary splits, and 3-char affix-only fragments. See [tests/README.md](tests/README.md).
+34 tests (25 single-fetch + 9 multi-fetch sequences for cross-call reassembly) across HIGH/MEDIUM/LOW/legit/reassembly buckets, covering all 8 evasion views, Layer-5 false-positive guards, multi-pattern HIGH combinations, ordering-token reorder attacks, cross-session isolation, letter-boundary splits, 3-char affix-only fragments, and confusable-letter bridges. See [tests/README.md](tests/README.md).
 
 ## License
 
