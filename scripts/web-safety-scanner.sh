@@ -1167,9 +1167,12 @@ fi
 if [ "$TOTAL" -eq 0 ] && [ "$E8_ACTIVE" = "false" ]; then
   # No detections, no open reassembly window. Still check if current fetch
   # has a suspicious indicator that should open the window — that requires
-  # SUSPICIOUS_TOKENS_FILE which is built in the E8 block below. Build it
-  # here so we can check before exiting.
+  # SUSPICIOUS_TOKENS_FILE + SUSPICIOUS_AFFIX_FILE which are built in the
+  # E8 block below. Build them here so we can check before exiting.
   SUSPICIOUS_TOKENS_FILE="$TMP_DIR/e8-suspicious.txt"
+  SUSPICIOUS_AFFIX_FILE="$TMP_DIR/e8-affixes.txt"
+
+  # Whole tokens (length >= 3, space-tokenized)
   printf '%s\n' \
     "${MED_INSTRUCTION_OVERRIDE[@]}" \
     "${MED_ROLE_MANIPULATION[@]}" \
@@ -1182,9 +1185,35 @@ if [ "$TOTAL" -eq 0 ] && [ "$E8_ACTIVE" = "false" ]; then
     | sed 's/[^a-z0-9]//g' \
     | awk 'length($0) >= 3' \
     | sort -u > "$SUSPICIOUS_TOKENS_FILE"
+
+  # v6.1 affix index — 3+ char substrings of MED patterns (spaces stripped).
+  # Catches affix-only fragments like "obe" (substring of "obey" in "do not obey").
+  # 3-char minimum avoids the FP storm that 2-char would cause (common bigrams
+  # like "th", "he", "in" appear in every English document).
+  printf '%s\n' \
+    "${MED_INSTRUCTION_OVERRIDE[@]}" \
+    "${MED_ROLE_MANIPULATION[@]}" \
+    "${MED_GENERIC_DELIMITERS[@]}" \
+    "${MED_PROMPT_EXTRACTION[@]}" \
+    "${MED_JAILBREAK[@]}" \
+    "${MED_AUTHORITY[@]}" \
+    | tr '[:upper:]' '[:lower:]' \
+    | sed 's/[^a-z0-9]//g' \
+    | awk '
+      length($0) >= 3 {
+        len = length($0)
+        for (sublen = 3; sublen <= len; sublen++) {
+          for (start = 1; start + sublen - 1 <= len; start++) {
+            print substr($0, start, sublen)
+          }
+        }
+      }
+    ' | sort -u > "$SUSPICIOUS_AFFIX_FILE"
+
   E8_ORDERING_REGEX='(part [0-9]+( of |/)[0-9]+|step [0-9]+|segment [a-z]\b|page [0-9]+ of [0-9]+|[0-9]+편)'
   if printf '%s' "$LOWER_OUTPUT" | grep -qiE -- "$E8_ORDERING_REGEX" \
-     || printf '%s' "$LOWER_OUTPUT" | grep -qiFf "$SUSPICIOUS_TOKENS_FILE" 2>/dev/null; then
+     || printf '%s' "$LOWER_OUTPUT" | grep -qiFf "$SUSPICIOUS_TOKENS_FILE" 2>/dev/null \
+     || printf '%s' "$LOWER_OUTPUT" | grep -qiFf "$SUSPICIOUS_AFFIX_FILE" 2>/dev/null; then
     E8_ACTIVE=true
   fi
 fi
@@ -1464,6 +1493,7 @@ E8_TOTAL_CAP_KB=48
 # Take all tokens of length >= 3 from the four most signal-rich MED arrays.
 # May already be built by the early-exit pre-check above; rebuild is idempotent.
 SUSPICIOUS_TOKENS_FILE="$TMP_DIR/e8-suspicious.txt"
+SUSPICIOUS_AFFIX_FILE="$TMP_DIR/e8-affixes.txt"
 if [ ! -s "$SUSPICIOUS_TOKENS_FILE" ]; then
   printf '%s\n' \
     "${MED_INSTRUCTION_OVERRIDE[@]}" \
@@ -1477,6 +1507,29 @@ if [ ! -s "$SUSPICIOUS_TOKENS_FILE" ]; then
     | sed 's/[^a-z0-9]//g' \
     | awk 'length($0) >= 3' \
     | sort -u > "$SUSPICIOUS_TOKENS_FILE"
+fi
+if [ ! -s "$SUSPICIOUS_AFFIX_FILE" ]; then
+  # v6.1: 3+ char substrings of MED patterns (spaces stripped). Catches
+  # affix-only fragments like "obe" (substring of "obey" inside "do not obey").
+  printf '%s\n' \
+    "${MED_INSTRUCTION_OVERRIDE[@]}" \
+    "${MED_ROLE_MANIPULATION[@]}" \
+    "${MED_GENERIC_DELIMITERS[@]}" \
+    "${MED_PROMPT_EXTRACTION[@]}" \
+    "${MED_JAILBREAK[@]}" \
+    "${MED_AUTHORITY[@]}" \
+    | tr '[:upper:]' '[:lower:]' \
+    | sed 's/[^a-z0-9]//g' \
+    | awk '
+      length($0) >= 3 {
+        len = length($0)
+        for (sublen = 3; sublen <= len; sublen++) {
+          for (start = 1; start + sublen - 1 <= len; start++) {
+            print substr($0, start, sublen)
+          }
+        }
+      }
+    ' | sort -u > "$SUSPICIOUS_AFFIX_FILE"
 fi
 
 # Ordering-token regex catches "Part 1/3", "Step 2", "Segment B", "Page 1 of 5",
@@ -1497,13 +1550,17 @@ e8_lock() {
 e8_unlock() { rmdir "${SESSION_FRAGMENTS}.lock" 2>/dev/null; }
 
 # Test if input contains a suspicious indicator (substring or ordering token).
-# Used to decide whether to store + reassemble.
+# Used to decide whether to store + reassemble. v6.1 also checks the affix
+# index to catch fragments that are AFFIX-ONLY (e.g., "obe" without "obey").
 e8_has_indicator() {
   local content="$1"
   if printf '%s' "$content" | grep -qiE -- "$E8_ORDERING_REGEX"; then
     return 0
   fi
   if printf '%s' "$content" | grep -qiFf "$SUSPICIOUS_TOKENS_FILE" 2>/dev/null; then
+    return 0
+  fi
+  if printf '%s' "$content" | grep -qiFf "$SUSPICIOUS_AFFIX_FILE" 2>/dev/null; then
     return 0
   fi
   return 1
@@ -1552,17 +1609,43 @@ if [ -f "$SESSION_FRAGMENTS" ] && [ "$e8_should_store" = "true" ]; then
   E8_FRAG_COUNT=$(printf '%s\n' "$E8_FRAG_ROWS" | grep -c . 2>/dev/null || echo 0)
 
   if [ "$E8_FRAG_COUNT" -ge 2 ]; then
-    # Build two concatenations: chronological + ordering-token-sorted.
-    # For the label-sorted concat, strip the ordering token itself from each
-    # fragment so the actual payload words can become contiguous when joined
-    # (otherwise "Part 1: ignore Part 2: previous" never matches "ignore previous").
+    # Build three concatenations:
+    #   1. chronological (arrival order, space-joined)
+    #   2. ordering-token-sorted (label-aware, preamble stripped)
+    #   3. smart-join (v6.1, bridges affix-only boundary words without space —
+    #      catches letter-boundary splits like "ign" + "ore" → "ignore")
     E8_CHRON_CONCAT=""
+    E8_SMART_CONCAT=""
     E8_LABELED=""
+    PREV_LAST_WORD=""
+    FIRST_FRAG=true
     while IFS=$'\t' read -r ts seq tool urlhash marker b64; do
       [ -z "$b64" ] && continue
       DECODED=$(printf '%s' "$b64" | base64 -d 2>/dev/null)
       [ -z "$DECODED" ] && continue
       E8_CHRON_CONCAT="${E8_CHRON_CONCAT} ${DECODED}"
+
+      # v6.1 smart-join: bridge boundary if BOTH the previous fragment's last
+      # word AND this fragment's first word are in the affix index but NOT
+      # whole SUSPICIOUS_TOKENS. Indicates an intentional letter-split rather
+      # than a legitimate word boundary.
+      FIRST_WORD=$(printf '%s' "$DECODED" | tr -c '[:alnum:]' ' ' | awk '{print $1}' | tr '[:upper:]' '[:lower:]')
+      if [ "$FIRST_FRAG" = "true" ]; then
+        E8_SMART_CONCAT="$DECODED"
+        FIRST_FRAG=false
+      else
+        SEP=" "
+        if [ -n "$PREV_LAST_WORD" ] && [ -n "$FIRST_WORD" ] \
+           && grep -qxF -- "$PREV_LAST_WORD" "$SUSPICIOUS_AFFIX_FILE" 2>/dev/null \
+           && grep -qxF -- "$FIRST_WORD" "$SUSPICIOUS_AFFIX_FILE" 2>/dev/null \
+           && ! grep -qxF -- "$PREV_LAST_WORD" "$SUSPICIOUS_TOKENS_FILE" 2>/dev/null \
+           && ! grep -qxF -- "$FIRST_WORD" "$SUSPICIOUS_TOKENS_FILE" 2>/dev/null; then
+          SEP=""
+        fi
+        E8_SMART_CONCAT="${E8_SMART_CONCAT}${SEP}${DECODED}"
+      fi
+      PREV_LAST_WORD=$(printf '%s' "$DECODED" | tr -c '[:alnum:]' ' ' | awk '{print $NF}' | tr '[:upper:]' '[:lower:]')
+
       # Extract ordering key (numeric); default 999999 for unlabeled
       ORDER_KEY=$(printf '%s' "$DECODED" | grep -oiE 'part [0-9]+|step [0-9]+|page [0-9]+' | head -1 | grep -oE '[0-9]+')
       [ -z "$ORDER_KEY" ] && ORDER_KEY=999999
@@ -1577,16 +1660,18 @@ if [ -f "$SESSION_FRAGMENTS" ] && [ "$e8_should_store" = "true" ]; then
 
     E8_LABEL_CONCAT=$(printf '%s' "$E8_LABELED" | sort -n -t '|' -k1,1 | awk -F'\\|\\|\\|' '{print $2}' | tr '\n' ' ')
 
-    # Run 8-view normalization on both concats
+    # Run 8-view normalization on all three concats
     E8_CHRON_DIR="$TMP_DIR/e8-chron"
     E8_LABEL_DIR="$TMP_DIR/e8-label"
-    mkdir -p "$E8_CHRON_DIR" "$E8_LABEL_DIR"
+    E8_SMART_DIR="$TMP_DIR/e8-smart"
+    mkdir -p "$E8_CHRON_DIR" "$E8_LABEL_DIR" "$E8_SMART_DIR"
     printf '%s' "$E8_CHRON_CONCAT" | generate_views "$E8_CHRON_DIR"
     printf '%s' "$E8_LABEL_CONCAT" | generate_views "$E8_LABEL_DIR"
+    printf '%s' "$E8_SMART_CONCAT" | generate_views "$E8_SMART_DIR"
 
-    # Grep MED patterns against both view sets
+    # Grep MED patterns against all three view sets
     E8_RAW_MATCHES=""
-    for vd in "$E8_CHRON_DIR" "$E8_LABEL_DIR"; do
+    for vd in "$E8_CHRON_DIR" "$E8_LABEL_DIR" "$E8_SMART_DIR"; do
       for vf in "$vd"/*.txt; do
         [ -f "$vf" ] || continue
         m=$(grep -oFf "$TMP_DIR/med.pat" "$vf" 2>/dev/null || true)

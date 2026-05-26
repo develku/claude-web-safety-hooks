@@ -2,6 +2,26 @@
 
 All notable changes to this project. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [6.1.0] — 2026-05-26
+
+Closes the two known limitations documented at v6.0 release: letter-boundary
+splits and affix-only fragments. Both gaps were flagged by Codex during the
+v6.0 DCA round and deferred; this release resolves them with two narrow
+mechanisms.
+
+### Added
+
+- **Affix index** (`$TMP_DIR/e8-affixes.txt`) — precomputed at scanner startup from MED patterns (spaces stripped). Contains all substrings of length ≥ 3 from each pattern. Used as an additional storage trigger so fragments containing partial-word substrings (e.g., `obe` from `obey`) get stored even when they don't carry a full SUSPICIOUS_TOKEN.
+- **Smart-join concat** — third reassembly variant alongside chronological + label-sorted. Bridges fragment boundaries without space when BOTH boundary words are in the affix index but NOT full SUSPICIOUS_TOKENS. Catches letter-boundary splits (`ign` + `ore` → `ignore`) and 3-char affix-only splits (`dis` + `reg` + `ard` → `disregard`).
+- **2 new test payloads** — `reassembly-letter-boundary` (3-char letter split bridging via smart-join), `reassembly-affix-3char` (full 3-fragment affix-only sequence reassembling `disregard your instructions`).
+
+### Known limitations (deferred, narrower scope than v6.0)
+
+- **2-char-only splits** — e.g., `do not ` + `ob` + `ey`. The 3-char minimum on the affix index excludes 2-char substrings (`ob`, `ey`), so fragments at 2-char granularity are not stored. Going lower causes a FP storm (`th`, `he`, `in` are universal English bigrams).
+- **Single-side affix bridges with intervening tokens** — smart-join requires BOTH boundary words to be affix-only. If one side is a regular common English word (length ≥ 5 not in the affix index), the bridge fails. Trade-off accepted: relaxing to "one side affix-only" had measurable FP risk on benign content.
+
+These are genuinely narrow attack classes given the 5-min window and the requirement that the attacker control multiple consecutive fetches at sub-3-char fidelity.
+
 ## [6.0.0] — 2026-05-26
 
 Cross-call payload reassembly detection (E8). The scanner now defends against

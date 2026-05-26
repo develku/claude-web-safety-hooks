@@ -1,6 +1,6 @@
 {
   "name": "web-safety",
-  "version": "6.0.0",
+  "version": "6.1.0",
   "description": "Defense-in-depth prompt-injection protection for Claude Code's web-fetching tools",
   "author": {
     "name": "develku",

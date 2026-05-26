@@ -68,7 +68,7 @@ See [docs/tuning.md](docs/tuning.md) for environment variables, severity tuning,
 
 ## Versions
 
-See [CHANGELOG.md](CHANGELOG.md) for the per-version feature list. Latest is **6.0.0** — cross-call payload reassembly (E8) including label-reorder defense, session scoping, auto-derived trigger lexicon. Previous: **5.2.0** — plugin packaging, portability refactor, fail-closed grep error handling, URL allowlist, fix for paths containing spaces.
+See [CHANGELOG.md](CHANGELOG.md) for the per-version feature list. Latest is **6.1.0** — closes both v6.0 known limitations: letter-boundary splits via smart-join concat, affix-only fragments via 3-char affix index. Previous: **6.0.0** — cross-call payload reassembly (E8). **5.2.0** — plugin packaging, portability refactor, URL allowlist, paths-with-spaces fix.
 
 ## Tests
 
@@ -76,7 +76,7 @@ See [CHANGELOG.md](CHANGELOG.md) for the per-version feature list. Latest is **6
 ./tests/run-tests.sh
 ```
 
-29 tests (25 single-fetch + 4 multi-fetch sequences for cross-call reassembly) across HIGH/MEDIUM/LOW/legit/reassembly buckets, covering all 8 evasion views, Layer-5 false-positive guards, multi-pattern HIGH combinations, ordering-token reorder attacks, and cross-session isolation. See [tests/README.md](tests/README.md).
+31 tests (25 single-fetch + 6 multi-fetch sequences for cross-call reassembly) across HIGH/MEDIUM/LOW/legit/reassembly buckets, covering all 8 evasion views, Layer-5 false-positive guards, multi-pattern HIGH combinations, ordering-token reorder attacks, cross-session isolation, letter-boundary splits, and 3-char affix-only fragments. See [tests/README.md](tests/README.md).
 
 ## License
 
