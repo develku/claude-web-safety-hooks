@@ -2,6 +2,12 @@
 
 All notable changes to this project. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [6.2.1] — 2026-05-26
+
+### Fixed
+
+- **`marketplace.json` source format compatibility.** Initial v6.0 marketplace.json used `"source": "."` (relative-path same-repo form), which is not supported by older Claude Code versions. The first real install attempt failed with `"This plugin uses a source type your Claude Code version does not support"`. Switched to the explicit GitHub object form `{"source": "github", "repo": "develku/claude-web-safety-hooks"}` which is universally supported.
+
 ## [6.2.0] — 2026-05-26
 
 Plugin-only installation. The manual install path is removed from the documentation.
