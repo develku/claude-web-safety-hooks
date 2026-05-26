@@ -10,6 +10,7 @@ How to customise the scanner without forking it.
 | `VERIFY_CONTEXT_ENABLED` | `true` | `false` disables Layer 5 (revert to v5.1 behaviour — every `MED_GENERIC_DELIMITERS` match pages the user) |
 | `WEB_SAFETY_CONFIG_DIR` | `~/.claude/hooks` | Where the audit log, blocklist, and allowlist live. Persists across plugin updates |
 | `CLAUDE_PLUGIN_ROOT` | (set by Claude Code) | Plugin install location — scripts auto-resolve sibling paths from here. Don't set manually |
+| `CLAUDE_SESSION_ID` | `$PPID` fallback | Scopes `/tmp/web-safety-session-*` files per Claude session. Set automatically by recent Claude Code versions. Override only for testing (each unique value = isolated state). |
 
 Example — disable Layer 5 for a single session:
 
@@ -104,15 +105,24 @@ If the scanner pauses you on legitimate content:
 3. **If the URL host is consistently trusted** — add it to the allowlist (covers soft blocks only; doesn't suppress content-scan hits).
 4. **If a specific pattern is over-firing** — open `scripts/web-safety-scanner.sh`, find the pattern in its severity array, and either remove it or move it to a lower-severity array. Add a `legit-*` payload to `tests/payloads/` capturing the false-positive context so regression tests guard against re-adding it.
 
-## Cross-tool escalation tuning
+## Cross-tool escalation + reassembly tuning
 
 The scanner escalates MEDIUM → HIGH when 3+ tools trigger injection warnings in a 5-minute window. The constants are `SESSION_WINDOW=300` (seconds) and the check `if [ "$SESSION_HITS" -ge 2 ]` (current call makes it 3+). Tighten by lowering the threshold; loosen by raising the window.
 
-Session state is stored at `/tmp/web-safety-session-state` and pruned automatically. Wipe it manually if you want a clean slate without restarting Claude:
+Session state is stored at `/tmp/web-safety-session-${SESSION_ID}-state` (correlation) and `/tmp/web-safety-session-${SESSION_ID}-fragments` (E8 reassembly excerpts). Both are scoped per Claude Code session via `CLAUDE_SESSION_ID` (or `PPID` fallback). Wipe manually for a clean slate:
 
 ```bash
-rm -f /tmp/web-safety-session-state
+rm -f /tmp/web-safety-session-*-state /tmp/web-safety-session-*-fragments
 ```
+
+Reassembly (E8) constants near the top of the scanner:
+
+| Constant | Default | Effect |
+|---|---|---|
+| `E8_MAX_FRAGMENTS` | 20 | FIFO cap on stored fragments per session |
+| `E8_EXCERPT_SIZE` | 1500 | Max bytes per stored fragment (head of lowercased input) |
+| `E8_TOTAL_CAP_KB` | 48 | Soft cap for total store size |
+| `E8_ORDERING_REGEX` | `(part \d+( of \|/)\d+\|step \d+\|...)` | Pattern that activates label-sorted reassembly |
 
 ## Performance
 

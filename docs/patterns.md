@@ -103,6 +103,32 @@ These are the patterns most prone to false positives in technical documentation 
 
 Disable Layer 5 entirely with `VERIFY_CONTEXT_ENABLED=false` to revert to v5.1 behaviour.
 
+## Layer 4b: cross-call payload reassembly (v6.0+)
+
+Defends against attackers who split injection payloads across multiple web fetches. The scanner stores normalized excerpts of each suspicious fetch in a session-scoped sidecar (`/tmp/web-safety-session-${SESSION_ID}-fragments`, 0600 perms, mkdir-locked) and on every subsequent fetch:
+
+1. Checks whether the current fetch has a soft trigger — auto-derived from MED arrays (every ≥3-char token from MED_INSTRUCTION_OVERRIDE, MED_ROLE_MANIPULATION, MED_GENERIC_DELIMITERS, MED_PROMPT_EXTRACTION, MED_JAILBREAK, MED_AUTHORITY) — or contains an ordering token (`Part 1/3`, `Step 2`, `Page 5 of 10`, Korean `1편`).
+2. Stores the excerpt (first 1.5KB of lowercased content) if eligible.
+3. Concatenates all in-window fragments in **two orderings**:
+   - Chronological (arrival order)
+   - Label-sorted (when ordering tokens present, sort by parsed key; ordering preambles stripped so payload words become contiguous)
+4. Runs the existing 8-view normalization + MED pattern grep pipeline against both concatenations.
+5. Promotes to HIGH severity if any match crosses ≥2 fragments (within-fragment matches were already adjudicated by per-fetch + Layer 5).
+
+Operational properties:
+
+- **Session scoped** — `CLAUDE_SESSION_ID` (or `PPID` fallback) prevents two concurrent Claude Code sessions from polluting each other's fragments.
+- **Reassemble-before-evict** — eviction never runs before reassembly check, defeating the "pad with junk to evict early fragments" attack.
+- **Bounded** — 20 records max, FIFO eviction.
+- **Performance** — single MED grep against ~6KB concat, no LLM call. ~10ms when fired.
+
+Known limitations (deferred):
+
+- Letter-boundary splits (`ign` + `ore`) bypass because concat inserts a space between fragments.
+- Affix-only fragments (e.g., a fragment containing only `ob` from `obey`) aren't stored because the trigger check uses substring match, not prefix/suffix participation.
+
+Audit log entry (`[REASSEMBLED]`) lists all participating ts/tool/url_hash so the operator can scope the incident across the affected fetches.
+
 ## What you see when it triggers
 
 **HIGH severity (or ESCALATED):**

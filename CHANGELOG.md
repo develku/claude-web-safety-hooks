@@ -2,6 +2,50 @@
 
 All notable changes to this project. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [6.0.0] — 2026-05-26
+
+Cross-call payload reassembly detection (E8). The scanner now defends against
+prompt-injection payloads that an attacker splits across multiple web-fetching
+tool calls — each fragment alone falling below detection threshold, but
+reassembly across the 5-minute window forming a known attack.
+
+Design hardened against four attack classes through DCA cross-model review
+([artifact](../.claude/dca/20260526T113627_e8-cross-call-payload-reassembly.md)
+in operator-local store; not in repo):
+
+1. **Sequential reassembly** — fragments delivered in attack order
+2. **Ordering-token reordering** — `Part 1/3`, `Step N`, `Page N of M` labels
+3. **Cross-session pollution** — two concurrent Claude sessions polluting
+   each other's correlation state (inherited bug in v5.2 SESSION_STATE)
+4. **Eviction padding** — attacker pads with junk to evict early fragments
+   (mitigated by reassemble-before-evict ordering)
+
+### Added
+
+- **`SESSION_FRAGMENTS` sidecar file** — `/tmp/web-safety-session-${SESSION_ID}-fragments`. TSV format `<ts> <seq> <tool> <url_hash> F <base64>`. 0600 perms. `mkdir`-based atomic lock (portable, no `flock` dependency).
+- **`E8_ACTIVE` window detection** — when current fetch contains a suspicious indicator OR session has open fragments, the scanner runs past the TOTAL=0 early exit to engage reassembly. Necessary because the whole point of E8 is detecting attacks whose individual fetches don't trigger.
+- **Auto-derived suspicious-token lexicon** — extracted from MED pattern arrays at scanner startup; ≥3-char tokens deduplicated. Won't drift when MED patterns are extended. Replaces the brittle hand-curated word list considered in the design phase.
+- **Ordering-token detection + label-sorted reassembly** — detects `Part \d+/\d+`, `Step \d+`, `Segment [A-Z]`, `Page \d+ of \d+`, Korean `\d+편`. When present, builds a second concat sorted by ordering key (and strips the ordering preamble itself so payload words become contiguous). Chronological + label-sorted concats both grep'd against the MED pattern set.
+- **Cross-fragment match filter** — reassembly matches are only declared genuine when the match string does NOT appear in any single fragment alone. Within-fragment matches were already caught by per-fetch + Layer 5; reassembly catches only the novel cross-call case.
+- **`[REASSEMBLED]` audit log entry** — lists all participating ts/tool/url_hash so the operator can scope an incident.
+- **Sequence mode in test harness** — directory payloads (`tests/payloads/<bucket>-<name>/<NN>.txt`) run multiple fetches against the SAME session. Filename `<NN>.<LABEL>.txt` opt-in for multi-session interleaving (cross-session-isolation tests).
+- **4 new sequence test payloads**: `reassembly-basic`, `reassembly-labeled-reorder`, `legit-multi-fetch-no-attack`, `legit-cross-session-isolation`.
+
+### Fixed
+
+- **Cross-session pollution in `SESSION_STATE`** — inherited bug from v5.1. Two concurrent Claude Code sessions previously shared `/tmp/web-safety-session-state`, polluting each other's escalation counter. Now scoped via `${CLAUDE_SESSION_ID:-$PPID}`. **All users benefit**, not just E8 callers.
+- **`umask 0077`** applied before writing `/tmp` state files so other users cannot read scanned content.
+
+### Changed
+
+- **8-view normalization** extracted into a `generate_views()` function. Reassembly runs the same pipeline on the concatenated string, so encoding-evasion + reassembly combinations are caught.
+- **TMP_DIR creation** moved to immediately after lowercasing input. Per-fetch views are written directly to disk instead of accumulating in shell variables (saves ~400KB of shell memory on large pages).
+
+### Known limitations (deferred to next round)
+
+- **Letter-boundary split + encoding evasion** — fragments split mid-word (`ign` + `ore`) with optional encoding still bypass because the concat inserts a space between fragments which breaks the merged word. A "no-space concat" variant is the obvious mitigation but introduces FP risk on legitimate adjacent fetches. Out of scope for v6.0; addressed when stress evidence justifies.
+- **Affix-only fragments** — a fragment containing only `ob` (no full SUSPICIOUS_TOKEN substring) is not stored, so an attack like `do not ` + `ob` + `ey` is missed unless the third fragment carries a token. Codex flagged; mitigation requires prefix/suffix participation logic in the trigger check.
+
 ## [5.2.0] — 2026-05-26
 
 Plugin packaging + portability + reliability pass after operator migrated to a new system.

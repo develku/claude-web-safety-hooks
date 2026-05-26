@@ -78,8 +78,20 @@ RATE_LIMIT_SECONDS=5
 # Cross-tool correlation: track injection signals across tool calls
 # Escalates severity if multiple tools in one session show injection patterns
 # =============================================================================
-SESSION_STATE="/tmp/web-safety-session-state"
+
+# Session scoping — prevents two concurrent Claude Code sessions from polluting
+# each other's correlation and reassembly state. CLAUDE_SESSION_ID is exposed
+# by Claude Code hooks (recent versions); PPID is a stable session-lifetime
+# fallback. Per DCA artifact 20260526T113627_e8-cross-call-payload-reassembly.md
+# this fixes an inherited bug in SESSION_STATE plus scopes the new fragment
+# sidecar introduced in E8.
+SESSION_ID="${CLAUDE_SESSION_ID:-$PPID}"
+SESSION_STATE="/tmp/web-safety-session-${SESSION_ID}-state"
+SESSION_FRAGMENTS="/tmp/web-safety-session-${SESSION_ID}-fragments"
 SESSION_WINDOW=300  # 5-minute sliding window
+
+# Tighten perms on /tmp state files so other users can't read scanned content.
+umask 0077
 
 # Read session hit count (prune entries older than SESSION_WINDOW)
 # Format: <timestamp> <tool> <url> <status>  where status is H (hit) or C (cleared)
@@ -130,49 +142,76 @@ fi
 LOWER_OUTPUT=$(echo "$TOOL_OUTPUT" | tr '[:upper:]' '[:lower:]')
 
 # =============================================================================
-# Evasion-resistant normalized copies (scanned alongside LOWER_OUTPUT)
-# Each view strips a different obfuscation layer. All views are scanned.
+# Evasion-resistant normalized views — generated into a target directory.
+# Per DCA artifact 20260526T113627: factored into a function so the same
+# pipeline runs on both the per-fetch input and the E8 reassembled string.
+# Each view strips a different obfuscation layer. All views are grep'd.
 # =============================================================================
+#
+# generate_views <target_dir>
+#   stdin: lowercased input string
+#   writes: <target_dir>/{lower,collapsed,decoded,stripped,confusable,unicode_ws,tag_stripped,url_decoded}.txt
+generate_views() {
+  local target_dir="$1"
+  local input
+  input=$(cat)
 
-# View 1: Whitespace-collapsed — catches "i g n o r e  p r e v i o u s"
-# Detects runs of 4+ single letters separated by single spaces and strips the
-# internal spaces. Runs BEFORE tr -s so multi-space word boundaries survive
-# (otherwise "i g n o r e   p r e v i o u s" loses word boundary after squash).
-# Old approach merged single-letter pairs but stopped at "ig no re" — a 5+ year
-# evasion class missed since v5.1 until the test harness flagged it 2026-05-26.
-COLLAPSED_OUTPUT=$(echo "$LOWER_OUTPUT" | \
-  perl -pe 's{(?<![a-z])([a-z](?: [a-z]){3,})(?![a-z])}{(my $m=$1)=~s/ //g; $m}ge' | \
-  tr -s '[:space:]' ' ')
+  # View 0: lowercase baseline
+  printf '%s' "$input" > "$target_dir/lower.txt"
 
-# View 2: HTML entity decoded — catches &#105;gnore, &lt;system&gt;, etc.
-HTML_DECODED_OUTPUT=$(echo "$LOWER_OUTPUT" | \
-  sed 's/&#x\([0-9a-f]\{2\}\);/\\x\1/g' | \
-  sed 's/&#\([0-9]\{2,3\}\);/ENTITY_\1/g' | \
-  sed 's/&lt;/</g; s/&gt;/>/g; s/&amp;/\&/g; s/&quot;/"/g; s/&#39;/'"'"'/g' | \
-  sed "s/ENTITY_105/i/g; s/ENTITY_103/g/g; s/ENTITY_110/n/g; s/ENTITY_111/o/g; s/ENTITY_114/r/g; s/ENTITY_101/e/g; s/ENTITY_115/s/g; s/ENTITY_116/t/g; s/ENTITY_121/y/g; s/ENTITY_112/p/g; s/ENTITY_109/m/g; s/ENTITY_100/d/g; s/ENTITY_97/a/g; s/ENTITY_98/b/g; s/ENTITY_99/c/g; s/ENTITY_102/f/g; s/ENTITY_104/h/g; s/ENTITY_106/j/g; s/ENTITY_107/k/g; s/ENTITY_108/l/g; s/ENTITY_113/q/g; s/ENTITY_117/u/g; s/ENTITY_118/v/g; s/ENTITY_119/w/g; s/ENTITY_120/x/g; s/ENTITY_122/z/g")
+  # View 1: Whitespace-collapsed — catches "i g n o r e  p r e v i o u s".
+  # Detects runs of 4+ single letters separated by single spaces and strips
+  # the internal spaces. Runs BEFORE tr -s so multi-space word boundaries
+  # survive (otherwise "i g n o r e   p r e v i o u s" loses word boundary
+  # after squash). Old approach merged single-letter pairs but stopped at
+  # "ig no re" — a 5+ year evasion class missed since v5.1 until the test
+  # harness flagged it 2026-05-26.
+  printf '%s' "$input" | \
+    perl -pe 's{(?<![a-z])([a-z](?: [a-z]){3,})(?![a-z])}{(my $m=$1)=~s/ //g; $m}ge' | \
+    tr -s '[:space:]' ' ' > "$target_dir/collapsed.txt"
 
-# View 3: Punctuation/separator stripped — catches "i.g.n.o.r.e", "i-g-n-o-r-e", "i_g_n_o_r_e"
-STRIPPED_OUTPUT=$(echo "$LOWER_OUTPUT" | sed 's/[._*|,;:!?+=#~\\/\-]//g' | sed 's/[[:space:]]\{1,\}/ /g')
+  # View 2: HTML entity decoded — catches &#105;gnore, &lt;system&gt;, etc.
+  printf '%s' "$input" | \
+    sed 's/&#x\([0-9a-f]\{2\}\);/\\x\1/g' | \
+    sed 's/&#\([0-9]\{2,3\}\);/ENTITY_\1/g' | \
+    sed 's/&lt;/</g; s/&gt;/>/g; s/&amp;/\&/g; s/&quot;/"/g; s/&#39;/'"'"'/g' | \
+    sed "s/ENTITY_105/i/g; s/ENTITY_103/g/g; s/ENTITY_110/n/g; s/ENTITY_111/o/g; s/ENTITY_114/r/g; s/ENTITY_101/e/g; s/ENTITY_115/s/g; s/ENTITY_116/t/g; s/ENTITY_121/y/g; s/ENTITY_112/p/g; s/ENTITY_109/m/g; s/ENTITY_100/d/g; s/ENTITY_97/a/g; s/ENTITY_98/b/g; s/ENTITY_99/c/g; s/ENTITY_102/f/g; s/ENTITY_104/h/g; s/ENTITY_106/j/g; s/ENTITY_107/k/g; s/ENTITY_108/l/g; s/ENTITY_113/q/g; s/ENTITY_117/u/g; s/ENTITY_118/v/g; s/ENTITY_119/w/g; s/ENTITY_120/x/g; s/ENTITY_122/z/g" \
+    > "$target_dir/decoded.txt"
 
-# View 4: Unicode confusable normalization — catches Cyrillic а→a, е→e, о→o etc.
-# Common Latin lookalikes from Cyrillic, Greek, and fullwidth ranges
-# Also strips combining diacritical marks (U+0300-036F) and variation selectors (U+FE00-FE0F)
-CONFUSABLE_OUTPUT=$(echo "$LOWER_OUTPUT" | \
-  sed 's/а/a/g; s/е/e/g; s/о/o/g; s/р/p/g; s/с/c/g; s/у/y/g; s/х/x/g; s/і/i/g; s/ј/j/g; s/ѕ/s/g; s/ԁ/d/g; s/ɡ/g/g; s/ɑ/a/g; s/ε/e/g; s/ο/o/g; s/ν/v/g; s/ι/i/g; s/κ/k/g; s/τ/t/g; s/η/n/g' | \
-  sed 's/ａ/a/g; s/ｂ/b/g; s/ｃ/c/g; s/ｄ/d/g; s/ｅ/e/g; s/ｆ/f/g; s/ｇ/g/g; s/ｈ/h/g; s/ｉ/i/g; s/ｊ/j/g; s/ｋ/k/g; s/ｌ/l/g; s/ｍ/m/g; s/ｎ/n/g; s/ｏ/o/g; s/ｐ/p/g; s/ｑ/q/g; s/ｒ/r/g; s/ｓ/s/g; s/ｔ/t/g; s/ｕ/u/g; s/ｖ/v/g; s/ｗ/w/g; s/ｘ/x/g; s/ｙ/y/g; s/ｚ/z/g' | \
-  perl -CSD -pe 's/[\x{0300}-\x{036F}\x{FE00}-\x{FE0F}]//g' 2>/dev/null)
+  # View 3: Punctuation/separator stripped — catches "i.g.n.o.r.e", "i-g-n-o-r-e", "i_g_n_o_r_e"
+  printf '%s' "$input" | \
+    sed 's/[._*|,;:!?+=#~\\/\-]//g' | \
+    sed 's/[[:space:]]\{1,\}/ /g' > "$target_dir/stripped.txt"
 
-# View 5: Unicode whitespace normalized — catches NBSP, em space, ideographic space separators
-UNICODE_WS_OUTPUT=$(echo "$LOWER_OUTPUT" | \
-  perl -CSD -pe 's/[\x{00A0}\x{2002}\x{2003}\x{200A}\x{3000}]/ /g' 2>/dev/null | \
-  tr -s ' ')
+  # View 4: Unicode confusable normalization — catches Cyrillic а→a, fullwidth ｉ→i, etc.
+  # Also strips combining diacritical marks (U+0300-036F) and variation selectors (U+FE00-FE0F).
+  printf '%s' "$input" | \
+    sed 's/а/a/g; s/е/e/g; s/о/o/g; s/р/p/g; s/с/c/g; s/у/y/g; s/х/x/g; s/і/i/g; s/ј/j/g; s/ѕ/s/g; s/ԁ/d/g; s/ɡ/g/g; s/ɑ/a/g; s/ε/e/g; s/ο/o/g; s/ν/v/g; s/ι/i/g; s/κ/k/g; s/τ/t/g; s/η/n/g' | \
+    sed 's/ａ/a/g; s/ｂ/b/g; s/ｃ/c/g; s/ｄ/d/g; s/ｅ/e/g; s/ｆ/f/g; s/ｇ/g/g; s/ｈ/h/g; s/ｉ/i/g; s/ｊ/j/g; s/ｋ/k/g; s/ｌ/l/g; s/ｍ/m/g; s/ｎ/n/g; s/ｏ/o/g; s/ｐ/p/g; s/ｑ/q/g; s/ｒ/r/g; s/ｓ/s/g; s/ｔ/t/g; s/ｕ/u/g; s/ｖ/v/g; s/ｗ/w/g; s/ｘ/x/g; s/ｙ/y/g; s/ｚ/z/g' | \
+    perl -CSD -pe 's/[\x{0300}-\x{036F}\x{FE00}-\x{FE0F}]//g' 2>/dev/null \
+    > "$target_dir/confusable.txt"
 
-# View 6: HTML/XML tag stripped — catches "ign<span></span>ore prev<b></b>ious"
-TAG_STRIPPED_OUTPUT=$(echo "$LOWER_OUTPUT" | sed 's/<[^>]*>//g')
+  # View 5: Unicode whitespace normalized — catches NBSP, em/ideographic space.
+  printf '%s' "$input" | \
+    perl -CSD -pe 's/[\x{00A0}\x{2002}\x{2003}\x{200A}\x{3000}]/ /g' 2>/dev/null | \
+    tr -s ' ' > "$target_dir/unicode_ws.txt"
 
-# View 7: URL percent-decoded — catches "%69gnore %70revious %69nstructions"
-URL_DECODED_OUTPUT=$(echo "$LOWER_OUTPUT" | \
-  perl -pe 's/%([0-9a-fA-F]{2})/chr(hex($1))/ge')
+  # View 6: HTML/XML tag stripped — catches "ign<span></span>ore prev<b></b>ious".
+  printf '%s' "$input" | sed 's/<[^>]*>//g' > "$target_dir/tag_stripped.txt"
+
+  # View 7: URL percent-decoded — catches "%69gnore %70revious %69nstructions".
+  printf '%s' "$input" | \
+    perl -pe 's/%([0-9a-fA-F]{2})/chr(hex($1))/ge' > "$target_dir/url_decoded.txt"
+}
+
+# Create scanner working dir early so generate_views can write into it.
+# Previously TMP_DIR was created after pattern arrays (~line 910); moved up
+# so per-fetch view generation can write directly to disk instead of
+# accumulating in shell variables (saves ~50KB × 8 of shell memory).
+TMP_DIR=$(mktemp -d)
+trap "rm -rf $TMP_DIR" EXIT
+
+echo "$LOWER_OUTPUT" | generate_views "$TMP_DIR"
 
 FOUND_HIGH=()
 FOUND_MEDIUM=()
@@ -893,10 +932,8 @@ LOW_MARKDOWN_IMAGES=(
 # Batch pattern matching (performance optimized, bash 3.2 compatible)
 # Uses temp pattern files + grep -Ff for 3 calls per severity
 # instead of O(n) calls per pattern. ~10x faster for 400+ patterns.
+# TMP_DIR + per-fetch views were already created above by generate_views.
 # =============================================================================
-
-TMP_DIR=$(mktemp -d)
-trap "rm -rf $TMP_DIR" EXIT
 
 # Build pattern files (lowercase, one per severity)
 for p in "${HIGH_LLM_TOKENS[@]}" "${HIGH_TOOL_FAKING[@]}" "${HIGH_EXFIL[@]}"; do
@@ -925,15 +962,7 @@ for p in "${LOW_HTML_CSS[@]}" "${LOW_MARKDOWN_IMAGES[@]}"; do
   echo "$p" | tr '[:upper:]' '[:lower:]'
 done > "$TMP_DIR/low.pat"
 
-# Write content views to files (grep -f reads faster from files)
-echo "$LOWER_OUTPUT" > "$TMP_DIR/lower.txt"
-echo "$COLLAPSED_OUTPUT" > "$TMP_DIR/collapsed.txt"
-echo "$HTML_DECODED_OUTPUT" > "$TMP_DIR/decoded.txt"
-echo "$STRIPPED_OUTPUT" > "$TMP_DIR/stripped.txt"
-echo "$CONFUSABLE_OUTPUT" > "$TMP_DIR/confusable.txt"
-echo "$UNICODE_WS_OUTPUT" > "$TMP_DIR/unicode_ws.txt"
-echo "$TAG_STRIPPED_OUTPUT" > "$TMP_DIR/tag_stripped.txt"
-echo "$URL_DECODED_OUTPUT" > "$TMP_DIR/url_decoded.txt"
+# Note: per-fetch view files were written by generate_views above.
 
 # Batch grep across 8 evasion views. Fail-closed: if any grep returns exit > 1
 # (real error, not "no match"), treat as a HIGH-severity hit so the user is
@@ -1124,7 +1153,43 @@ MED_COUNT=${#FOUND_MEDIUM[@]}
 LOW_COUNT=${#FOUND_LOW[@]}
 TOTAL=$((HIGH_COUNT + MED_COUNT + LOW_COUNT))
 
-if [ "$TOTAL" -eq 0 ]; then
+# E8 pre-check: even with TOTAL=0, we need to engage if the current fetch has
+# a suspicious-indicator word OR the session already has stored fragments
+# (= active reassembly window). Otherwise the early exit blocks fragment
+# storage and reassembly — defeating the whole feature.
+E8_ACTIVE=false
+if [ -f "$SESSION_FRAGMENTS" ]; then
+  E8_ACTIVE=true  # window already open — every fetch participates
+fi
+# Defer indicator-check until SUSPICIOUS_TOKENS_FILE is built (E8 block).
+# For now, if SESSION_FRAGMENTS exists OR TOTAL>0, proceed.
+
+if [ "$TOTAL" -eq 0 ] && [ "$E8_ACTIVE" = "false" ]; then
+  # No detections, no open reassembly window. Still check if current fetch
+  # has a suspicious indicator that should open the window — that requires
+  # SUSPICIOUS_TOKENS_FILE which is built in the E8 block below. Build it
+  # here so we can check before exiting.
+  SUSPICIOUS_TOKENS_FILE="$TMP_DIR/e8-suspicious.txt"
+  printf '%s\n' \
+    "${MED_INSTRUCTION_OVERRIDE[@]}" \
+    "${MED_ROLE_MANIPULATION[@]}" \
+    "${MED_GENERIC_DELIMITERS[@]}" \
+    "${MED_PROMPT_EXTRACTION[@]}" \
+    "${MED_JAILBREAK[@]}" \
+    "${MED_AUTHORITY[@]}" \
+    | tr ' ' '\n' \
+    | tr '[:upper:]' '[:lower:]' \
+    | sed 's/[^a-z0-9]//g' \
+    | awk 'length($0) >= 3' \
+    | sort -u > "$SUSPICIOUS_TOKENS_FILE"
+  E8_ORDERING_REGEX='(part [0-9]+( of |/)[0-9]+|step [0-9]+|segment [a-z]\b|page [0-9]+ of [0-9]+|[0-9]+편)'
+  if printf '%s' "$LOWER_OUTPUT" | grep -qiE -- "$E8_ORDERING_REGEX" \
+     || printf '%s' "$LOWER_OUTPUT" | grep -qiFf "$SUSPICIOUS_TOKENS_FILE" 2>/dev/null; then
+    E8_ACTIVE=true
+  fi
+fi
+
+if [ "$TOTAL" -eq 0 ] && [ "$E8_ACTIVE" = "false" ]; then
   exit 0
 fi
 
@@ -1378,6 +1443,223 @@ MSG
   echo "$sanitized"
   echo "[Sanitized: ${preserved} kept, ${redacted} redacted / ${total_lines} total | hash: ${content_hash:0:12}]"
 }
+
+# =============================================================================
+# E8: Cross-call payload reassembly detection
+# Per DCA artifact 20260526T113627_e8-cross-call-payload-reassembly.md
+#
+# Stores normalized excerpts of suspicious fragments in a session-scoped
+# sidecar, then runs the existing 8-view + grep pipeline on the concatenated
+# stream (both chronological and ordering-token-sorted). A match that
+# cannot be located in any single fragment alone indicates a cross-call
+# reassembly attack — escalates to HIGH.
+# =============================================================================
+
+E8_MAX_FRAGMENTS=20
+E8_EXCERPT_SIZE=1500
+E8_TOTAL_CAP_KB=48
+
+# Auto-derive trigger lexicon from MED pattern arrays — won't drift when
+# patterns are added (per Codex critique, hand-curated lists are brittle).
+# Take all tokens of length >= 3 from the four most signal-rich MED arrays.
+# May already be built by the early-exit pre-check above; rebuild is idempotent.
+SUSPICIOUS_TOKENS_FILE="$TMP_DIR/e8-suspicious.txt"
+if [ ! -s "$SUSPICIOUS_TOKENS_FILE" ]; then
+  printf '%s\n' \
+    "${MED_INSTRUCTION_OVERRIDE[@]}" \
+    "${MED_ROLE_MANIPULATION[@]}" \
+    "${MED_GENERIC_DELIMITERS[@]}" \
+    "${MED_PROMPT_EXTRACTION[@]}" \
+    "${MED_JAILBREAK[@]}" \
+    "${MED_AUTHORITY[@]}" \
+    | tr ' ' '\n' \
+    | tr '[:upper:]' '[:lower:]' \
+    | sed 's/[^a-z0-9]//g' \
+    | awk 'length($0) >= 3' \
+    | sort -u > "$SUSPICIOUS_TOKENS_FILE"
+fi
+
+# Ordering-token regex catches "Part 1/3", "Step 2", "Segment B", "Page 1 of 5",
+# Korean "1편/2편" — see Codex critique on label-reorder attack class.
+E8_ORDERING_REGEX="${E8_ORDERING_REGEX:-(part [0-9]+( of |/)[0-9]+|step [0-9]+|segment [a-z]\\b|page [0-9]+ of [0-9]+|[0-9]+편)}"
+
+# Atomic lock via mkdir (portable; no `flock` dependency on macOS).
+e8_lock() {
+  local lockdir="${SESSION_FRAGMENTS}.lock"
+  local tries=20
+  while [ "$tries" -gt 0 ]; do
+    if mkdir "$lockdir" 2>/dev/null; then return 0; fi
+    tries=$((tries - 1))
+    sleep 0.02
+  done
+  return 1
+}
+e8_unlock() { rmdir "${SESSION_FRAGMENTS}.lock" 2>/dev/null; }
+
+# Test if input contains a suspicious indicator (substring or ordering token).
+# Used to decide whether to store + reassemble.
+e8_has_indicator() {
+  local content="$1"
+  if printf '%s' "$content" | grep -qiE -- "$E8_ORDERING_REGEX"; then
+    return 0
+  fi
+  if printf '%s' "$content" | grep -qiFf "$SUSPICIOUS_TOKENS_FILE" 2>/dev/null; then
+    return 0
+  fi
+  return 1
+}
+
+# Decide whether to store this fetch's excerpt.
+# Triggers: suspicious indicator OR session already has prior hits (active session).
+e8_should_store=false
+if e8_has_indicator "$LOWER_OUTPUT"; then
+  e8_should_store=true
+elif [ "$SESSION_HITS" -ge 1 ]; then
+  e8_should_store=true
+fi
+
+# Store excerpt of current fetch if eligible.
+if [ "$e8_should_store" = "true" ]; then
+  # Excerpt: take first E8_EXCERPT_SIZE bytes of lowered content (post-normalization
+  # would lose the most signal-dense form; lower preserves enough for reassembly grep)
+  E8_EXCERPT=$(printf '%s' "$LOWER_OUTPUT" | head -c "$E8_EXCERPT_SIZE")
+  # Plain base64 (single-line, no padding stripped) — TSV-safe since
+  # +, /, = don't conflict with tab. Avoid tr '+/' '-_' which BSD tr
+  # parses as an illegal option ("-_") on macOS.
+  E8_B64=$(printf '%s' "$E8_EXCERPT" | base64 | tr -d '\n')
+  E8_URL_HASH=$(printf '%s' "${TOOL_URL:-no-url}" | shasum -a 256 2>/dev/null | cut -c1-12)
+  E8_SEQ=$(date +%s%N 2>/dev/null | tail -c 7 | head -c 6)
+  [ -z "$E8_SEQ" ] && E8_SEQ=$$
+  if e8_lock; then
+    : > "${SESSION_FRAGMENTS}.tmp" 2>/dev/null
+    # Append new line
+    printf '%s\t%s\t%s\t%s\tF\t%s\n' \
+      "$(date +%s)" "$E8_SEQ" "$TOOL_NAME" "$E8_URL_HASH" "$E8_B64" \
+      >> "$SESSION_FRAGMENTS"
+    chmod 0600 "$SESSION_FRAGMENTS" 2>/dev/null
+    e8_unlock
+  fi
+fi
+
+# Reassembly check (only attempt if we just stored or if active session has prior frags)
+E8_REASSEMBLED=false
+E8_REASSEMBLED_PATTERNS=""
+E8_REASSEMBLED_PARTICIPATING=""
+
+if [ -f "$SESSION_FRAGMENTS" ] && [ "$e8_should_store" = "true" ]; then
+  E8_CUTOFF=$(($(date +%s) - SESSION_WINDOW))
+  E8_FRAG_ROWS=$(awk -F'\t' -v cutoff="$E8_CUTOFF" '$1 >= cutoff' "$SESSION_FRAGMENTS" 2>/dev/null)
+  E8_FRAG_COUNT=$(printf '%s\n' "$E8_FRAG_ROWS" | grep -c . 2>/dev/null || echo 0)
+
+  if [ "$E8_FRAG_COUNT" -ge 2 ]; then
+    # Build two concatenations: chronological + ordering-token-sorted.
+    # For the label-sorted concat, strip the ordering token itself from each
+    # fragment so the actual payload words can become contiguous when joined
+    # (otherwise "Part 1: ignore Part 2: previous" never matches "ignore previous").
+    E8_CHRON_CONCAT=""
+    E8_LABELED=""
+    while IFS=$'\t' read -r ts seq tool urlhash marker b64; do
+      [ -z "$b64" ] && continue
+      DECODED=$(printf '%s' "$b64" | base64 -d 2>/dev/null)
+      [ -z "$DECODED" ] && continue
+      E8_CHRON_CONCAT="${E8_CHRON_CONCAT} ${DECODED}"
+      # Extract ordering key (numeric); default 999999 for unlabeled
+      ORDER_KEY=$(printf '%s' "$DECODED" | grep -oiE 'part [0-9]+|step [0-9]+|page [0-9]+' | head -1 | grep -oE '[0-9]+')
+      [ -z "$ORDER_KEY" ] && ORDER_KEY=999999
+      # Strip the ordering preamble for the label-sorted concat
+      DECODED_STRIPPED=$(printf '%s' "$DECODED" | \
+        sed -E 's/part[[:space:]]+[0-9]+([[:space:]]+of[[:space:]]+|\/)[0-9]+[[:space:]]*:?//gi' | \
+        sed -E 's/step[[:space:]]+[0-9]+[[:space:]]*:?//gi' | \
+        sed -E 's/segment[[:space:]]+[a-z][[:space:]]*:?//gi' | \
+        sed -E 's/page[[:space:]]+[0-9]+[[:space:]]+of[[:space:]]+[0-9]+[[:space:]]*:?//gi')
+      E8_LABELED="${E8_LABELED}${ORDER_KEY}|||${DECODED_STRIPPED}"$'\n'
+    done <<< "$E8_FRAG_ROWS"
+
+    E8_LABEL_CONCAT=$(printf '%s' "$E8_LABELED" | sort -n -t '|' -k1,1 | awk -F'\\|\\|\\|' '{print $2}' | tr '\n' ' ')
+
+    # Run 8-view normalization on both concats
+    E8_CHRON_DIR="$TMP_DIR/e8-chron"
+    E8_LABEL_DIR="$TMP_DIR/e8-label"
+    mkdir -p "$E8_CHRON_DIR" "$E8_LABEL_DIR"
+    printf '%s' "$E8_CHRON_CONCAT" | generate_views "$E8_CHRON_DIR"
+    printf '%s' "$E8_LABEL_CONCAT" | generate_views "$E8_LABEL_DIR"
+
+    # Grep MED patterns against both view sets
+    E8_RAW_MATCHES=""
+    for vd in "$E8_CHRON_DIR" "$E8_LABEL_DIR"; do
+      for vf in "$vd"/*.txt; do
+        [ -f "$vf" ] || continue
+        m=$(grep -oFf "$TMP_DIR/med.pat" "$vf" 2>/dev/null || true)
+        [ -n "$m" ] && E8_RAW_MATCHES="${E8_RAW_MATCHES}${m}"$'\n'
+      done
+    done
+
+    E8_UNIQ_MATCHES=$(printf '%s' "$E8_RAW_MATCHES" | sort -u | grep -v '^$' || true)
+
+    if [ -n "$E8_UNIQ_MATCHES" ]; then
+      # Cross-fragment check: a match is genuine reassembly ONLY if it does NOT
+      # appear in any single fragment alone. Per-fetch + Layer 5 already
+      # adjudicated within-fragment matches.
+      E8_CROSS_MATCHES=""
+      while IFS= read -r match; do
+        [ -z "$match" ] && continue
+        FOUND_IN_SINGLE=false
+        while IFS=$'\t' read -r ts seq tool urlhash marker b64; do
+          [ -z "$b64" ] && continue
+          SINGLE=$(printf '%s' "$b64" | base64 -d 2>/dev/null | tr '[:upper:]' '[:lower:]')
+          if printf '%s' "$SINGLE" | grep -qF -- "$match" 2>/dev/null; then
+            FOUND_IN_SINGLE=true
+            break
+          fi
+        done <<< "$E8_FRAG_ROWS"
+        [ "$FOUND_IN_SINGLE" = "false" ] && E8_CROSS_MATCHES="${E8_CROSS_MATCHES}${match}"$'\n'
+      done <<< "$E8_UNIQ_MATCHES"
+
+      E8_CROSS_MATCHES=$(printf '%s' "$E8_CROSS_MATCHES" | sort -u | grep -v '^$' || true)
+
+      if [ -n "$E8_CROSS_MATCHES" ]; then
+        E8_REASSEMBLED=true
+        E8_REASSEMBLED_PATTERNS="$E8_CROSS_MATCHES"
+        E8_REASSEMBLED_PARTICIPATING=$(printf '%s\n' "$E8_FRAG_ROWS" | awk -F'\t' '{print $1"/"$3"/"$4}' | tr '\n' ',' | sed 's/,$//')
+
+        # Promote each reassembled pattern into UNIQUE_HIGH so existing
+        # HIGH branch handles output formatting + sanitization.
+        while IFS= read -r match; do
+          [ -z "$match" ] && continue
+          # Map lowercase match back to original casing via MED arrays
+          for p in "${MED_INSTRUCTION_OVERRIDE[@]}" "${MED_ROLE_MANIPULATION[@]}" \
+                   "${MED_GENERIC_DELIMITERS[@]}" "${MED_PROMPT_EXTRACTION[@]}" \
+                   "${MED_JAILBREAK[@]}" "${MED_AUTHORITY[@]}"; do
+            if [ "$(printf '%s' "$p" | tr '[:upper:]' '[:lower:]')" = "$match" ]; then
+              UNIQUE_HIGH+=("[REASSEMBLED] $p")
+              break
+            fi
+          done
+        done <<< "$E8_CROSS_MATCHES"
+
+        # Audit log
+        printf '[%s] [REASSEMBLED] participating=%s patterns=%s\n' \
+          "$(date '+%Y-%m-%d %H:%M:%S')" \
+          "$E8_REASSEMBLED_PARTICIPATING" \
+          "$(printf '%s' "$E8_CROSS_MATCHES" | tr '\n' ',' | sed 's/,$//')" \
+          >> "$LOG_FILE"
+      fi
+    fi
+  fi
+fi
+
+# Prune fragments AFTER reassembly check (per Codex critique on eviction-padding).
+# Cap by line count first (cheaper than byte count for the common case).
+if [ -f "$SESSION_FRAGMENTS" ]; then
+  E8_LINES=$(wc -l < "$SESSION_FRAGMENTS" 2>/dev/null | tr -d ' ')
+  if [ "${E8_LINES:-0}" -gt "$E8_MAX_FRAGMENTS" ]; then
+    if e8_lock; then
+      tail -n "$E8_MAX_FRAGMENTS" "$SESSION_FRAGMENTS" > "${SESSION_FRAGMENTS}.tmp" 2>/dev/null \
+        && mv "${SESSION_FRAGMENTS}.tmp" "$SESSION_FRAGMENTS"
+      e8_unlock
+    fi
+  fi
+fi
 
 # --- HIGH SEVERITY: Stop or Critical Warning ---
 if [ ${#UNIQUE_HIGH[@]} -gt 0 ]; then
