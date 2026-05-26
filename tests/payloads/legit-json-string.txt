@@ -1,0 +1,7 @@
+REST API response example below.
+
+```json
+{"role": "assistant: helps with documentation", "version": 2}
+```
+
+This shows the role field as a labeled string.

@@ -55,9 +55,22 @@
 HIGH_SEVERITY_ACTION="${HIGH_SEVERITY_ACTION:-stop}"
 
 # =============================================================================
+# Path resolution
+# =============================================================================
+# HOOKS_DIR — where sibling scripts live (verifier). Works in plugin install
+# (${CLAUDE_PLUGIN_ROOT}/scripts) and legacy manual install ($(dirname "$0")).
+HOOKS_DIR="${CLAUDE_PLUGIN_ROOT:+${CLAUDE_PLUGIN_ROOT}/scripts}"
+HOOKS_DIR="${HOOKS_DIR:-$(cd "$(dirname "$0")" && pwd)}"
+
+# CONFIG_DIR — user-state (log, blocklist, allowlist). Persists across plugin
+# updates. Override with WEB_SAFETY_CONFIG_DIR. Defaults to ~/.claude/hooks.
+CONFIG_DIR="${WEB_SAFETY_CONFIG_DIR:-$HOME/.claude/hooks}"
+mkdir -p "$CONFIG_DIR" 2>/dev/null
+
+# =============================================================================
 # Notification Configuration
 # =============================================================================
-LOG_FILE="$HOME/.claude/hooks/web-safety.log"
+LOG_FILE="$CONFIG_DIR/web-safety.log"
 RATE_LIMIT_FILE="/tmp/web-safety-scanner-last-notify"
 RATE_LIMIT_SECONDS=5
 
@@ -122,10 +135,14 @@ LOWER_OUTPUT=$(echo "$TOOL_OUTPUT" | tr '[:upper:]' '[:lower:]')
 # =============================================================================
 
 # View 1: Whitespace-collapsed — catches "i g n o r e  p r e v i o u s"
-# Uses perl for BSD-compatible single-spaced-letter merging (sed \b unsupported on macOS)
+# Detects runs of 4+ single letters separated by single spaces and strips the
+# internal spaces. Runs BEFORE tr -s so multi-space word boundaries survive
+# (otherwise "i g n o r e   p r e v i o u s" loses word boundary after squash).
+# Old approach merged single-letter pairs but stopped at "ig no re" — a 5+ year
+# evasion class missed since v5.1 until the test harness flagged it 2026-05-26.
 COLLAPSED_OUTPUT=$(echo "$LOWER_OUTPUT" | \
-  tr -s '[:space:]' ' ' | \
-  perl -pe 'while(s/(?<![a-z])([a-z]) ([a-z]) /$1$2/g){}; s/(?<![a-z])([a-z]) ([a-z])(?![a-z])/$1$2/g')
+  perl -pe 's{(?<![a-z])([a-z](?: [a-z]){3,})(?![a-z])}{(my $m=$1)=~s/ //g; $m}ge' | \
+  tr -s '[:space:]' ' ')
 
 # View 2: HTML entity decoded — catches &#105;gnore, &lt;system&gt;, etc.
 HTML_DECODED_OUTPUT=$(echo "$LOWER_OUTPUT" | \
@@ -918,18 +935,33 @@ echo "$UNICODE_WS_OUTPUT" > "$TMP_DIR/unicode_ws.txt"
 echo "$TAG_STRIPPED_OUTPUT" > "$TMP_DIR/tag_stripped.txt"
 echo "$URL_DECODED_OUTPUT" > "$TMP_DIR/url_decoded.txt"
 
-# Batch grep: 5 calls per severity (one per view), collect unique matched patterns
+# Batch grep across 8 evasion views. Fail-closed: if any grep returns exit > 1
+# (real error, not "no match"), treat as a HIGH-severity hit so the user is
+# alerted rather than silently dropping detections from a malformed pattern.
+run_batch_grep() {
+  # Args: $1 = severity label (for logging), $2 = pattern file
+  local label="$1"
+  local patfile="$2"
+  local raw="" ec view
+  for view in lower collapsed decoded stripped confusable unicode_ws tag_stripped url_decoded; do
+    local out
+    out=$(grep -oFf "$patfile" "$TMP_DIR/${view}.txt" 2>"$TMP_DIR/grep.err")
+    ec=$?
+    if [ "$ec" -gt 1 ]; then
+      local err
+      err=$(head -1 "$TMP_DIR/grep.err" 2>/dev/null)
+      echo "[$(date '+%Y-%m-%d %H:%M:%S')] [SCANNER-ERROR] grep failed severity=${label} view=${view} exit=${ec} err=\"${err}\"" >> "$LOG_FILE"
+      FOUND_HIGH+=("scanner internal error (${label}/${view}) — fail-closed")
+      raw=""
+      break
+    fi
+    [ "$ec" -eq 0 ] && [ -n "$out" ] && raw="${raw}${out}"$'\n'
+  done
+  printf '%s' "$raw" | awk 'NF && !seen[$0]++'
+}
+
 # HIGH
-HIGH_MATCHES=$( {
-  grep -oFf "$TMP_DIR/high.pat" "$TMP_DIR/lower.txt" 2>/dev/null
-  grep -oFf "$TMP_DIR/high.pat" "$TMP_DIR/collapsed.txt" 2>/dev/null
-  grep -oFf "$TMP_DIR/high.pat" "$TMP_DIR/decoded.txt" 2>/dev/null
-  grep -oFf "$TMP_DIR/high.pat" "$TMP_DIR/stripped.txt" 2>/dev/null
-  grep -oFf "$TMP_DIR/high.pat" "$TMP_DIR/confusable.txt" 2>/dev/null
-  grep -oFf "$TMP_DIR/high.pat" "$TMP_DIR/unicode_ws.txt" 2>/dev/null
-  grep -oFf "$TMP_DIR/high.pat" "$TMP_DIR/tag_stripped.txt" 2>/dev/null
-  grep -oFf "$TMP_DIR/high.pat" "$TMP_DIR/url_decoded.txt" 2>/dev/null
-} | awk '!seen[$0]++' )
+HIGH_MATCHES=$(run_batch_grep "HIGH" "$TMP_DIR/high.pat")
 
 # Map matched lowercase back to original casing
 ALL_HIGH_PATTERNS=("${HIGH_LLM_TOKENS[@]}" "${HIGH_TOOL_FAKING[@]}" "${HIGH_EXFIL[@]}")
@@ -944,16 +976,7 @@ while IFS= read -r match; do
 done <<< "$HIGH_MATCHES"
 
 # MEDIUM
-MED_MATCHES=$( {
-  grep -oFf "$TMP_DIR/med.pat" "$TMP_DIR/lower.txt" 2>/dev/null
-  grep -oFf "$TMP_DIR/med.pat" "$TMP_DIR/collapsed.txt" 2>/dev/null
-  grep -oFf "$TMP_DIR/med.pat" "$TMP_DIR/decoded.txt" 2>/dev/null
-  grep -oFf "$TMP_DIR/med.pat" "$TMP_DIR/stripped.txt" 2>/dev/null
-  grep -oFf "$TMP_DIR/med.pat" "$TMP_DIR/confusable.txt" 2>/dev/null
-  grep -oFf "$TMP_DIR/med.pat" "$TMP_DIR/unicode_ws.txt" 2>/dev/null
-  grep -oFf "$TMP_DIR/med.pat" "$TMP_DIR/tag_stripped.txt" 2>/dev/null
-  grep -oFf "$TMP_DIR/med.pat" "$TMP_DIR/url_decoded.txt" 2>/dev/null
-} | awk '!seen[$0]++' )
+MED_MATCHES=$(run_batch_grep "MEDIUM" "$TMP_DIR/med.pat")
 
 ALL_MED_PATTERNS=( \
   "${MED_INSTRUCTION_OVERRIDE[@]}" \
@@ -980,8 +1003,16 @@ while IFS= read -r match; do
   done
 done <<< "$MED_MATCHES"
 
-# LOW (only lower view, no evasion)
-LOW_MATCHES=$(grep -oFf "$TMP_DIR/low.pat" "$TMP_DIR/lower.txt" 2>/dev/null | awk '!seen[$0]++')
+# LOW (only lower view, no evasion). Same fail-closed wrapper, single view.
+LOW_OUT=$(grep -oFf "$TMP_DIR/low.pat" "$TMP_DIR/lower.txt" 2>"$TMP_DIR/grep.err")
+LOW_EC=$?
+if [ "$LOW_EC" -gt 1 ]; then
+  echo "[$(date '+%Y-%m-%d %H:%M:%S')] [SCANNER-ERROR] grep failed severity=LOW exit=${LOW_EC} err=\"$(head -1 "$TMP_DIR/grep.err" 2>/dev/null)\"" >> "$LOG_FILE"
+  FOUND_HIGH+=("scanner internal error (LOW) — fail-closed")
+  LOW_MATCHES=""
+else
+  LOW_MATCHES=$(printf '%s' "$LOW_OUT" | awk 'NF && !seen[$0]++')
+fi
 ALL_LOW_PATTERNS=("${LOW_HTML_CSS[@]}" "${LOW_MARKDOWN_IMAGES[@]}")
 while IFS= read -r match; do
   [ -z "$match" ] && continue
@@ -1129,7 +1160,7 @@ fi
 # Disable with: VERIFY_CONTEXT_ENABLED=false
 # =============================================================================
 VERIFY_CONTEXT_ENABLED="${VERIFY_CONTEXT_ENABLED:-true}"
-VERIFIER_SCRIPT="$(dirname "$0")/web-safety-verify-context.sh"
+VERIFIER_SCRIPT="$HOOKS_DIR/web-safety-verify-context.sh"
 VERIFIER_TIMEOUT=0.5  # 500ms fail-closed timeout
 
 if [ "$VERIFY_CONTEXT_ENABLED" = "true" ] && [ ${#UNIQUE_MED[@]} -gt 0 ] && [ ${#UNIQUE_HIGH[@]} -eq 0 ] && [ -x "$VERIFIER_SCRIPT" ]; then
@@ -1161,9 +1192,11 @@ if [ "$VERIFY_CONTEXT_ENABLED" = "true" ] && [ ${#UNIQUE_MED[@]} -gt 0 ] && [ ${
       if [ -n "$LINE_NUM" ]; then
         # Call the verifier with timeout (fail-closed)
         # macOS lacks `timeout` — use perl alarm for SIGALRM-based timeout
+        # exec { $ARGV[0] } @ARGV bypasses the shell — single-element @ARGV
+        # otherwise goes through sh -c which word-splits paths with spaces.
         VERDICT=$(echo "$TOOL_OUTPUT" | \
           VERIFY_PATTERN="$lc_p" VERIFY_LINE_NUM="$LINE_NUM" \
-          perl -e 'alarm 1; exec @ARGV' "$VERIFIER_SCRIPT" 2>/dev/null || \
+          perl -e 'alarm 1; exec { $ARGV[0] } @ARGV' "$VERIFIER_SCRIPT" 2>/dev/null || \
           echo '{"verdict":"genuine","reason":"verifier timeout or error"}')
 
         VERDICT_VALUE=$(echo "$VERDICT" | jq -r '.verdict // "genuine"' 2>/dev/null || echo "genuine")

@@ -1,0 +1,14 @@
+{
+  "name": "develku",
+  "owner": {
+    "name": "develku",
+    "url": "https://github.com/develku"
+  },
+  "plugins": [
+    {
+      "name": "web-safety",
+      "source": ".",
+      "description": "Prompt-injection defense hooks for Claude Code"
+    }
+  ]
+}

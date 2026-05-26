@@ -1,0 +1,19 @@
+{
+  "name": "web-safety",
+  "version": "5.2.0",
+  "description": "Defense-in-depth prompt-injection protection for Claude Code's web-fetching tools",
+  "author": {
+    "name": "develku",
+    "url": "https://github.com/develku"
+  },
+  "homepage": "https://github.com/develku/claude-web-safety-hooks",
+  "repository": "https://github.com/develku/claude-web-safety-hooks",
+  "license": "MIT",
+  "keywords": [
+    "security",
+    "prompt-injection",
+    "web-fetch",
+    "hooks",
+    "defense-in-depth"
+  ]
+}

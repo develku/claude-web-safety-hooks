@@ -1,0 +1,7 @@
+Welcome to our blog!
+
+This page describes how DAN mode works in a sandbox.
+
+We have developer mode enabled for testing purposes.
+
+End of article.

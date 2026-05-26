@@ -1,0 +1,7 @@
+Photo gallery from our trip.
+
+![img](http://example.com/photo1.jpg)
+
+![image](http://example.com/photo2.jpg)
+
+Hope you enjoyed the photos.

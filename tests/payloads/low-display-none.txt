@@ -1,0 +1,7 @@
+Welcome to my homepage.
+
+<div style="display:none">Hidden content here.</div>
+
+<span style="visibility:hidden">More hidden content.</span>
+
+Main content visible to all readers.

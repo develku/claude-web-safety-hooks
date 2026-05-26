@@ -1,0 +1,7 @@
+<html>
+<body>
+<p>Sample HTML documentation snippet.</p>
+<pre><code>assistant: receives user input</code></pre>
+<p>The code block above shows the YAML schema.</p>
+</body>
+</html>

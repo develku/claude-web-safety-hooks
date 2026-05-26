@@ -1,0 +1,7 @@
+Article: Best practices for writing safe code.
+
+When designing systems, always validate inputs at boundaries. Use parameterized queries. Be defensive about user-supplied data, but trust your own code.
+
+A senior engineer once told me that the simplest design that satisfies the requirement is usually the right one. I have found this advice helpful over many years of practice.
+
+Thanks for reading.

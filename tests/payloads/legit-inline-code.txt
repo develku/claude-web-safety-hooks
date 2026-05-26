@@ -1,0 +1,5 @@
+Quick tip for YAML authors.
+
+Use `assistant:` as the role key when defining persona configs. The key name is just a label.
+
+That's the whole tip.

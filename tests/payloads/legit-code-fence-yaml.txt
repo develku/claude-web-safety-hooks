@@ -1,0 +1,11 @@
+Documentation for an agent config file.
+
+Here is a sample YAML that defines an agent persona.
+
+```yaml
+name: helper
+description: assistant: responds to user queries about cooking
+model: claude-haiku-4-5
+```
+
+The `assistant:` key in the YAML is just a label, not a directive to the model.
