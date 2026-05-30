@@ -63,7 +63,7 @@ See [docs/tuning.md](docs/tuning.md) for environment variables, severity tuning,
 
 ## Versions
 
-See [CHANGELOG.md](CHANGELOG.md) for the per-version feature list. Latest is **6.3.0** — slash commands (`/web-safety-report`, `/web-safety-allow`, `/web-safety-block`) + cross-platform CI test matrix. Previous: **6.2.0** — plugin-only installation; manual install path removed. **6.1.1** — confusable-letter bridge fix from stress testing. **6.1.0** — letter-boundary + affix-only limitation closures. **6.0.0** — cross-call payload reassembly (E8).
+See [CHANGELOG.md](CHANGELOG.md) for the per-version feature list. Latest is **6.3.1** — fix: slash-command `${CLAUDE_PLUGIN_ROOT}` substitution. **6.3.0** — slash commands (`/web-safety-report`, `/web-safety-allow`, `/web-safety-block`) + cross-platform CI test matrix. Previous: **6.2.0** — plugin-only installation; manual install path removed. **6.1.1** — confusable-letter bridge fix from stress testing. **6.1.0** — letter-boundary + affix-only limitation closures. **6.0.0** — cross-call payload reassembly (E8).
 
 ## Tests
 

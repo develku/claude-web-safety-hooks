@@ -2,6 +2,14 @@
 
 All notable changes to this project. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [6.3.1] — 2026-05-30
+
+First real invocation of the v6.3.0 commands exposed a substitution bug.
+
+### Fixed
+
+- **Slash commands referenced `$CLAUDE_PLUGIN_ROOT` without braces.** Claude Code substitutes the `${CLAUDE_PLUGIN_ROOT}` *braces* token textually before running an embedded `` !`…` `` command; the bare `$CLAUDE_PLUGIN_ROOT` form is passed through literally, so the `!`-exec shell expanded the unset variable to empty and the script path collapsed to `/scripts/web-safety-report.sh` (`No such file or directory`). Fixed all three commands to the braces form — matching the canonical pattern used by other installed plugins — quoted `"$ARGUMENTS"`, added `disable-model-invocation: true`, scoped `allowed-tools: Bash(bash:*)`, and removed the now-unnecessary natural-language fallback. The helper scripts themselves were correct and unchanged.
+
 ## [6.3.0] — 2026-05-30
 
 Interactive surface + continuous integration. The plugin was hooks-only; this release adds user-facing slash commands and a cross-platform CI test matrix.

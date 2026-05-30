@@ -1,13 +1,10 @@
 ---
 description: Summarize the web-safety audit log — counts by severity, top tools and hosts, recent events
-argument-hint: "[days]"
-allowed-tools: Bash
+argument-hint: '[days]'
+disable-model-invocation: true
+allowed-tools: Bash(bash:*)
 ---
 
-Show the user a summary of the web-safety audit log.
+!`bash "${CLAUDE_PLUGIN_ROOT}/scripts/web-safety-report.sh" "$ARGUMENTS"`
 
-Run this bundled, **read-only** helper script and present its markdown output verbatim (do not summarize or re-interpret it):
-
-!`bash "$CLAUDE_PLUGIN_ROOT/scripts/web-safety-report.sh" $ARGUMENTS`
-
-If the command above did not already run, execute it yourself with the Bash tool — the script lives at `$CLAUDE_PLUGIN_ROOT/scripts/web-safety-report.sh` (this plugin's `scripts/` directory). The optional argument is a number of days to limit the window (e.g. `7`); pass through whatever the user gave, or nothing for the full log.
+Present the script output above to the user verbatim — it is already formatted markdown. Do not summarize, re-interpret, or add commentary. The script is read-only (it never mutates the log). The optional argument is a number of days to limit the window (e.g. `7`).
