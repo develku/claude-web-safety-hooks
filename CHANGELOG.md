@@ -2,6 +2,22 @@
 
 All notable changes to this project. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [6.3.0] — 2026-05-30
+
+Interactive surface + continuous integration. The plugin was hooks-only; this release adds user-facing slash commands and a cross-platform CI test matrix.
+
+### Added
+
+- **Slash commands** (`commands/`, auto-discovered on install):
+  - `/web-safety-report [days]` — markdown summary of the audit log: counts by severity, top tools, top hosts, recent events. Optional `[days]` window. Read-only; never mutates the log.
+  - `/web-safety-allow <domain>` — validate + append a domain to the URL allowlist.
+  - `/web-safety-block <domain>` — validate + append a domain to the URL blocklist.
+- **Helper scripts** backing the commands (also usable standalone):
+  - `scripts/web-safety-report.sh` — log → markdown. GNU (`date -d`) and BSD (`date -v`) compatible.
+  - `scripts/web-safety-listctl.sh` — strict hostname validation + normalization (a pasted URL is reduced to its host) + dedupe before writing the files the pre-screening hook reads, so a malformed or shell-metacharacter entry can never reach them.
+- **CI** (`.github/workflows/tests.yml`) — runs the scanner suite + the new command-helper suite on a matrix of `ubuntu-latest` (GNU userland / bash 5) and `macos-latest` (BSD userland / bash 3.2), validating the "bash 3.2+ / cross-platform" claim. UTF-8 locale pinned per-OS to avoid the C/POSIX multibyte gotcha. Adds a tests badge to the README.
+- **Command-helper tests** (`tests/run-cmd-tests.sh`) — 9 cases: domain validation/rejection (incl. shell-metachar input), URL→host normalization, dedupe, allow-vs-block routing, and report summarization against a synthetic log.
+
 ## [6.2.2] — 2026-05-26
 
 ### Fixed

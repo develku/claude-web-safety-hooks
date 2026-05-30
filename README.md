@@ -4,6 +4,10 @@
 
 # Claude Web Safety
 
+<p align="center">
+  <a href="https://github.com/develku/claude-web-safety-hooks/actions/workflows/tests.yml"><img src="https://github.com/develku/claude-web-safety-hooks/actions/workflows/tests.yml/badge.svg" alt="tests"></a>
+</p>
+
 Defense-in-depth hooks for [Claude Code](https://docs.anthropic.com/en/docs/claude-code) that protect against **prompt injection from web content**. Distributed as a Claude Code plugin.
 
 When Claude Code fetches web pages or searches the web, the returned content could contain hidden instructions designed to manipulate Claude's behavior. These hooks screen URLs before fetching, scan returned content against 600+ injection patterns across 8 evasion-resistant views, and surgically redact attacks before Claude sees them.
@@ -59,15 +63,16 @@ See [docs/tuning.md](docs/tuning.md) for environment variables, severity tuning,
 
 ## Versions
 
-See [CHANGELOG.md](CHANGELOG.md) for the per-version feature list. Latest is **6.2.0** — plugin-only installation; manual install path removed. Previous: **6.1.1** — confusable-letter bridge fix from stress testing. **6.1.0** — letter-boundary + affix-only limitation closures. **6.0.0** — cross-call payload reassembly (E8).
+See [CHANGELOG.md](CHANGELOG.md) for the per-version feature list. Latest is **6.3.0** — slash commands (`/web-safety-report`, `/web-safety-allow`, `/web-safety-block`) + cross-platform CI test matrix. Previous: **6.2.0** — plugin-only installation; manual install path removed. **6.1.1** — confusable-letter bridge fix from stress testing. **6.1.0** — letter-boundary + affix-only limitation closures. **6.0.0** — cross-call payload reassembly (E8).
 
 ## Tests
 
 ```bash
-./tests/run-tests.sh
+./tests/run-tests.sh       # scanner — 34 payload cases
+./tests/run-cmd-tests.sh   # command helpers — 9 cases
 ```
 
-34 tests (25 single-fetch + 9 multi-fetch sequences for cross-call reassembly) across HIGH/MEDIUM/LOW/legit/reassembly buckets, covering all 8 evasion views, Layer-5 false-positive guards, multi-pattern HIGH combinations, ordering-token reorder attacks, cross-session isolation, letter-boundary splits, 3-char affix-only fragments, and confusable-letter bridges. See [tests/README.md](tests/README.md).
+34 scanner tests (25 single-fetch + 9 multi-fetch sequences for cross-call reassembly) across HIGH/MEDIUM/LOW/legit/reassembly buckets, covering all 8 evasion views, Layer-5 false-positive guards, multi-pattern HIGH combinations, ordering-token reorder attacks, cross-session isolation, letter-boundary splits, 3-char affix-only fragments, and confusable-letter bridges. A second suite (`run-cmd-tests.sh`) covers the report and allow/block helper scripts. Both run in CI on a Linux + macOS matrix. See [tests/README.md](tests/README.md).
 
 ## License
 

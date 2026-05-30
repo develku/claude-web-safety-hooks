@@ -49,6 +49,23 @@ malware-distribution.example.com
 known-injection-host.example.net
 ```
 
+## Slash commands
+
+The plugin ships three commands, auto-discovered when installed:
+
+| Command | What it does |
+|---|---|
+| `/web-safety-report [days]` | Markdown summary of the audit log — counts by severity, top tools, top hosts, recent events. Optional `[days]` limits the window (e.g. `/web-safety-report 7`). Read-only; never mutates the log. |
+| `/web-safety-allow <domain>` | Validate and append a domain to the allowlist above. Idempotent. |
+| `/web-safety-block <domain>` | Validate and append a domain to the blocklist above. Idempotent. |
+
+`allow` / `block` accept a bare domain or a full URL (reduced to its host) and reject anything that isn't a valid hostname — so a malformed or shell-metacharacter entry can never reach the files the pre-screening hook reads. The underlying helpers (`scripts/web-safety-report.sh`, `scripts/web-safety-listctl.sh`) also run standalone if you prefer the CLI:
+
+```bash
+scripts/web-safety-report.sh 7
+scripts/web-safety-listctl.sh allow github.com
+```
+
 ## Adding patterns
 
 Edit `scripts/web-safety-scanner.sh` and append to the relevant severity array. The arrays are grouped by attack class so the right home is usually obvious from the section comment.

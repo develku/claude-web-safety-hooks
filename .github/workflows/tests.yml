@@ -1,0 +1,48 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    name: scanner (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # Run every matrix leg even if one fails, so a Linux-only or macOS-only
+      # regression is visible in the same run instead of masking the other.
+      fail-fast: false
+      matrix:
+        include:
+          # GNU userland + bash 5.x
+          - os: ubuntu-latest
+            locale: C.UTF-8
+          # BSD userland + bash 3.2 — the primary target platform. Validates
+          # the "bash 3.2+ / cross-platform" claim in README.
+          - os: macos-latest
+            locale: en_US.UTF-8
+    env:
+      # The scanner normalizes Unicode confusables (Cyrillic, fullwidth, CJK)
+      # via sed/perl. A non-UTF-8 locale (CI default is often C/POSIX) can
+      # corrupt multibyte handling — the same class of gotcha as BSD-vs-GNU sed.
+      LANG: ${{ matrix.locale }}
+      LC_ALL: ${{ matrix.locale }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify runtime dependencies
+        # Fail loudly with a clear message if a dependency is missing, rather
+        # than letting the scanner emit a cryptic error mid-run. All of these
+        # are preinstalled on GitHub-hosted ubuntu and macos runners.
+        run: |
+          for c in bash jq perl shasum base64 sed grep awk; do
+            command -v "$c" >/dev/null || { echo "missing dependency: $c"; exit 1; }
+          done
+          bash --version | head -1
+
+      - name: Run scanner test suite
+        run: ./tests/run-tests.sh
+
+      - name: Run command-helper test suite
+        run: ./tests/run-cmd-tests.sh
