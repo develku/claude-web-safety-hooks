@@ -40,9 +40,11 @@ EGRESS_RE='(^|[^a-zA-Z0-9_])(curl|wget|ncat|nc|scp|sftp|aria2c|ftp|lynx|links|w3
 HTTPIE_RE='(^|[^a-zA-Z0-9_])https?[[:space:]]'
 ONELINER_RE='(python3?|node|ruby|perl)[[:space:]]+-(c|e)[[:space:]].*(urllib|requests|socket|http\.client|httplib|fetch\(|net::http|lwp|open-uri)'
 
+# Case-insensitive: macOS APFS is case-insensitive, so `CURL`/`HTTP` resolve to
+# the real binaries via PATH and would execute — match them too.
 IS_EGRESS=0
-printf '%s' "$COMMAND" | grep -qE  "$EGRESS_RE"   && IS_EGRESS=1
-printf '%s' "$COMMAND" | grep -qE  "$HTTPIE_RE"   && IS_EGRESS=1
+printf '%s' "$COMMAND" | grep -qEi "$EGRESS_RE"   && IS_EGRESS=1
+printf '%s' "$COMMAND" | grep -qEi "$HTTPIE_RE"   && IS_EGRESS=1
 printf '%s' "$COMMAND" | grep -qEi "$ONELINER_RE" && IS_EGRESS=1
 [ "$IS_EGRESS" = "1" ] || exit 0
 

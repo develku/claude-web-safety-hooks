@@ -11,7 +11,7 @@ New defense layer. The plugin detected injection in fetched content but did not 
 - **Layer 6 — Outbound exfiltration guard.** New PreToolUse(`Bash`) hook (`scripts/web-safety-egress.sh`) that breaks the inject→exfil chain: when a HIGH-severity prompt-injection was flagged in the session within the last 5 minutes, outbound network-egress commands (`curl`/`wget`/`scp`/`nc`/`aria2c`/HTTPie/text-browsers/inline `python -c`/`node -e` net one-liners — including path-qualified forms like `/usr/bin/curl`) are escalated to a user confirmation (`permissionDecision:"ask"`). The injected instruction cannot self-approve egress; a human decides.
 - Trusted-destination exemption via the existing `url-allowlist.txt`. A command with no extractable host (e.g. host hidden in a `python -c` variable) is treated as untrusted and still escalates.
 - Kill switch `WEB_SAFETY_EGRESS_GUARD_DISABLE=1`.
-- New test suite `tests/run-egress-tests.sh` (21 cases: producer + consumer + allowlist exemption + session isolation + path-qualified boundary regression), wired into the CI matrix.
+- New test suite `tests/run-egress-tests.sh` (23 cases: producer + consumer + allowlist exemption + session isolation + path-qualified + case-insensitive binary regressions), wired into the CI matrix.
 
 ### Changed
 
