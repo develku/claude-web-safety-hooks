@@ -2,6 +2,21 @@
 
 All notable changes to this project. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [7.0.0] — 2026-05-31
+
+New defense layer. The plugin detected injection in fetched content but did not stop the *next* step — a poisoned page telling Claude to read a secret and POST it out. Layer 6 closes that gap.
+
+### Added
+
+- **Layer 6 — Outbound exfiltration guard.** New PreToolUse(`Bash`) hook (`scripts/web-safety-egress.sh`) that breaks the inject→exfil chain: when a HIGH-severity prompt-injection was flagged in the session within the last 5 minutes, outbound network-egress commands (`curl`/`wget`/`scp`/`nc`/`aria2c`/HTTPie/text-browsers/inline `python -c`/`node -e` net one-liners — including path-qualified forms like `/usr/bin/curl`) are escalated to a user confirmation (`permissionDecision:"ask"`). The injected instruction cannot self-approve egress; a human decides.
+- Trusted-destination exemption via the existing `url-allowlist.txt`. A command with no extractable host (e.g. host hidden in a `python -c` variable) is treated as untrusted and still escalates.
+- Kill switch `WEB_SAFETY_EGRESS_GUARD_DISABLE=1`.
+- New test suite `tests/run-egress-tests.sh` (21 cases: producer + consumer + allowlist exemption + session isolation + path-qualified boundary regression), wired into the CI matrix.
+
+### Changed
+
+- The PostToolUse scanner now writes a per-session arm-state file (`/tmp/web-safety-session-<id>-armed`) on HIGH and ESCALATED detections, consumed by the new guard. No change to scanner detection behavior.
+
 ## [6.3.1] — 2026-05-30
 
 First real invocation of the v6.3.0 commands exposed a substitution bug.
