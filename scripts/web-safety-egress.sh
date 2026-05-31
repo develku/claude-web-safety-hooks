@@ -36,8 +36,8 @@ NOW=$(date +%s)
 [ $(( NOW - ARMED_AT )) -le "$WINDOW" ] || exit 0  # stale → defer
 
 # Step 2 — is this a network-egress command? (ported sharkyger pattern set)
-EGRESS_RE='(^|[^a-zA-Z0-9_./-])(curl|wget|ncat|nc|scp|sftp|aria2c|ftp|lynx|links|w3m)([^a-zA-Z0-9_-]|$)'
-HTTPIE_RE='(^|[^a-zA-Z0-9_./-])https?[[:space:]]'
+EGRESS_RE='(^|[^a-zA-Z0-9_])(curl|wget|ncat|nc|scp|sftp|aria2c|ftp|lynx|links|w3m)([^a-zA-Z0-9_-]|$)'
+HTTPIE_RE='(^|[^a-zA-Z0-9_])https?[[:space:]]'
 ONELINER_RE='(python3?|node|ruby|perl)[[:space:]]+-(c|e)[[:space:]].*(urllib|requests|socket|http\.client|httplib|fetch\(|net::http|lwp|open-uri)'
 
 IS_EGRESS=0
