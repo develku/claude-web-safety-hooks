@@ -201,3 +201,18 @@ Both PreToolUse and PostToolUse hooks trigger on the same matcher set:
 | `mcp__plugin_context7_context7__query-docs` | Context7 docs |
 
 The full matcher string lives in [`hooks/hooks.json`](../hooks/hooks.json).
+
+## Layer 6 — Outbound egress vectors (v7.0+)
+
+A PreToolUse(`Bash`) guard that breaks the **inject→exfil chain**. When Layer 1–5 flag a HIGH-severity injection, the scanner arms a per-session flag (`/tmp/web-safety-session-<id>-armed`). While that flag is fresh (≤ 5 min, the same window as cross-tool correlation), the guard escalates outbound network commands to a user confirmation (`permissionDecision:"ask"`) — the injected instruction cannot self-approve egress; a human decides.
+
+Matched egress command shapes:
+
+- Transfer tools: `curl`, `wget`, `nc`/`ncat`, `scp`, `sftp`, `aria2c`, `ftp`
+- HTTPie: leading `http `/`https `
+- Text browsers: `lynx`, `links`, `w3m`
+- Inline-interpreter network one-liners: `python`/`python3 -c`, `node -e`, `ruby -e`, `perl -e` containing a network primitive (`urllib`, `requests`, `socket`, `http.client`, `fetch(`, `Net::HTTP`, `LWP`, `open-uri`)
+
+A command whose destination host is in `url-allowlist.txt` is exempt; a command with **no extractable host** (e.g. host hidden in a `python -c` variable) is treated as untrusted and still escalates.
+
+**Documented limitation:** heavy obfuscation (base64-decoded commands, variable-indirected binary names, transfer tools not in the list) can evade the pattern set. The guard arms only after a HIGH detection and only escalates to a confirmation — it is a second line of defense, not a complete egress sandbox.

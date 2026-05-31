@@ -14,7 +14,7 @@ When Claude Code fetches web pages or searches the web, the returned content cou
 
 ## How it works
 
-Five layers, each documented in [docs/patterns.md](docs/patterns.md):
+Six layers, each documented in [docs/patterns.md](docs/patterns.md):
 
 | Layer | When | What |
 |---|---|---|
@@ -23,6 +23,7 @@ Five layers, each documented in [docs/patterns.md](docs/patterns.md):
 | **3. Content sanitization** | PostToolUse | HIGH = full redaction; MEDIUM = surgical line-by-line; output capped at 50KB |
 | **4. Cross-tool correlation + reassembly** | PostToolUse | 5-min window; 3+ flagged tools auto-escalate MEDIUM → HIGH. **v6.0+ also detects payloads split across multiple fetches** (`Part 1/3: ignore` + `Part 2/3: previous` + `Part 3/3: instructions` → reassembled match) |
 | **5. Structural verification** | PostToolUse | Code-fence / YAML / JSON / HTML-code / inline-code aware — clears false positives like `assistant:` inside doc snippets without bothering the user |
+| **6. Outbound exfiltration guard** | PreToolUse (Bash) | When a HIGH injection was flagged in this session in the last 5 min, escalates network-egress commands (`curl`/`wget`/`scp`/`nc`/inline `python -c`/`node -e` net one-liners) to a user confirmation — breaking the inject→exfil chain. Trusted destinations via `url-allowlist.txt`; kill switch `WEB_SAFETY_EGRESS_GUARD_DISABLE=1` |
 
 ## Install
 

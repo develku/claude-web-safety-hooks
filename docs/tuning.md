@@ -157,6 +157,17 @@ Benchmarked on 50 KB pages, Apple Silicon:
 
 No LLM calls. No API tokens beyond the `systemMessage` Claude reads from the hook response.
 
+## Layer 6 — Outbound exfiltration guard
+
+| Setting | Effect |
+|---|---|
+| `WEB_SAFETY_EGRESS_GUARD_DISABLE=1` | Kill switch — the guard defers unconditionally |
+| `url-allowlist.txt` (reused) | If every host extracted from an egress command suffix-matches an allowlist entry, the command is exempt (no confirmation). A command with no extractable host (e.g. host hidden in a `python -c` variable) is treated as untrusted and still escalates. |
+
+- **Arming window:** 300s (matches the scanner's `SESSION_WINDOW`), keyed to a HIGH detection in the same session. Not independently configurable.
+- **Posture:** soft-block — the guard returns `permissionDecision:"ask"`, surfacing a confirmation dialog; it never hard-denies. The injected instruction cannot self-approve egress; you decide.
+- **Fail-open:** unlike the scanner (which fails closed), the egress guard fails *open* on internal error (missing `jq`, unparseable input, unreadable arm-state) so a guard bug cannot block every outbound command in a flagged session. The normal armed+egress decision is already safe (`ask`).
+
 ## Limitations
 
 This is **not bulletproof**. Be aware:
