@@ -9,11 +9,14 @@ Layer 6 hardening from an adversarial stress test (~130 attack vectors across qu
 ### Fixed
 
 - **`ONELINER_RE` flag-skip evasion.** The interpreter one-liner detector required `-c`/`-e` *immediately* after the interpreter, so a single benign flag (`python3 -u -c …`, `python3 -B -c …`, `perl -MLWP::Simple -e …`) slipped past it. Reworked into an inline-exec match that tolerates intervening flags, paired with a network-token match that may appear anywhere in the command (so perl's `-MLWP` module flag is now caught, not just `use LWP` in the code body).
+- **Path-component false positive** (found by a focused pre-production stress pass). Adding `ssh` exposed a loose token boundary that admitted `.` and `/`, so common file operations (`ls ~/.ssh/`, `vim /etc/ssh/sshd_config`, `cat report.scp`, `ls nc.log`) spuriously asked. Boundaries now exclude path separators while still matching quoted (`'curl'`) and path-qualified (`/usr/bin/curl`) command forms.
+- **Separate-argument interpreter flags.** The first flag-skip fix tolerated only single-token flags; a flag taking a separate-word argument (`python3 -W ignore -c …`, `perl -I /tmp -e …`, `python3 -X faulthandler -c …`) still evaded. The matcher now tolerates one argument word per flag — without over-matching a normal `pytest -k requests -c pytest.ini`.
+- **Ruby `net/http` token.** The network-token set matched `net::http` but not the `require 'net/http'` path form; both are now recognized.
 
 ### Added
 
 - **Expanded egress coverage** (low-false-positive vectors found in the stress test): `rsync`, `ssh` (remote-exec / reverse-tunnel), `socat`, `telnet`, `netcat`, `openssl s_client`, and pure-bash `/dev/tcp` & `/dev/udp` redirection (no external binary). `scp`/`sftp` were already covered; `rsync`/`ssh` close the obvious sibling gap. Bare `openssl` (local crypto: `enc`/`genrsa`/`dgst`) is deliberately *not* matched — only `s_client`.
-- Regression tests for each new vector plus false-positive guards (`ssh-keygen`, `openssl genrsa`, a non-network `python -c`, `git commit` mentioning a net word, `telnetd`) — egress suite now 38 cases.
+- Regression tests for each new vector plus false-positive guards (`ssh-keygen`, `openssl genrsa`, a non-network `python -c`, `git commit` mentioning a net word, `telnetd`) plus a second round of guards (path-component FPs, separate-arg flags, `'curl'`/path-qualified preservation) — egress suite now 50 cases.
 - Docs note: `url-allowlist.txt` entries must be full registrable domains, never a bare public suffix (which would exempt every host under it).
 
 ### Notes

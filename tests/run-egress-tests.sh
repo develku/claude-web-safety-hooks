@@ -186,6 +186,38 @@ arm_fresh; out=$(egress_for "git commit -m \"use the requests library\""); ec=$?
 arm_fresh; out=$(egress_for "telnetd --version"); ec=$?
 { [ $ec -eq 0 ] && [ -z "$out" ]; } && ok "telnetd → defer (no telnet substring FP)" || bad "telnetd → defer (out=$out)"
 
+# final-stress-test fixes ── path-component FP: a token inside a file path must NOT match
+arm_fresh; out=$(egress_for "ls -la ~/.ssh/"); ec=$?
+{ [ $ec -eq 0 ] && [ -z "$out" ]; } && ok "~/.ssh/ path → defer (no ssh path FP)" || bad "~/.ssh/ → defer (out=$out)"
+arm_fresh; out=$(egress_for "cat ~/.ssh/known_hosts"); ec=$?
+{ [ $ec -eq 0 ] && [ -z "$out" ]; } && ok "cat ~/.ssh/known_hosts → defer" || bad "cat ~/.ssh/known_hosts → defer (out=$out)"
+arm_fresh; out=$(egress_for "vim /etc/ssh/sshd_config"); ec=$?
+{ [ $ec -eq 0 ] && [ -z "$out" ]; } && ok "/etc/ssh/ path → defer" || bad "/etc/ssh/ → defer (out=$out)"
+arm_fresh; out=$(egress_for "cp report.scp /tmp/"); ec=$?
+{ [ $ec -eq 0 ] && [ -z "$out" ]; } && ok "report.scp filename → defer" || bad "report.scp → defer (out=$out)"
+arm_fresh; out=$(egress_for "ls nc.log"); ec=$?
+{ [ $ec -eq 0 ] && [ -z "$out" ]; } && ok "nc.log filename → defer" || bad "nc.log → defer (out=$out)"
+# ...but a quoted command name MUST still match (boundary fix must not break quoting)
+arm_fresh; out=$(egress_for "'curl' https://sink.test/x")
+is_ask "$out" && ok "'curl' quoted → ask (quoting preserved)" || bad "'curl' quoted → ask (out=$out)"
+# ...and path-qualified binaries MUST still match
+arm_fresh; out=$(egress_for "/usr/bin/ssh user@sink.test \"x\"")
+is_ask "$out" && ok "/usr/bin/ssh path-qualified → ask" || bad "/usr/bin/ssh → ask (out=$out)"
+
+# final-stress-test fixes ── separate-arg interpreter flags must not evade
+arm_fresh; out=$(egress_for "python3 -W ignore -c \"import requests; requests.get(u)\"")
+is_ask "$out" && ok "python3 -W ignore -c → ask (separate-arg flag)" || bad "python3 -W ignore -c → ask (out=$out)"
+arm_fresh; out=$(egress_for "perl -I /tmp -e \"use LWP::Simple\"")
+is_ask "$out" && ok "perl -I /tmp -e → ask (separate-arg flag)" || bad "perl -I -e → ask (out=$out)"
+arm_fresh; out=$(egress_for "ruby -I lib -e \"require 'net/http'\"")
+is_ask "$out" && ok "ruby -I -e require net/http → ask" || bad "ruby net/http → ask (out=$out)"
+# ...without over-matching a normal pytest run (positional args break the flag run)
+arm_fresh; out=$(egress_for "python3 -m pytest tests -k requests -c pytest.ini"); ec=$?
+{ [ $ec -eq 0 ] && [ -z "$out" ]; } && ok "pytest -k requests -c pytest.ini → defer (no over-match)" || bad "pytest → defer (out=$out)"
+# ...and a separate-arg flag with no net token still defers
+arm_fresh; out=$(egress_for "python3 -W ignore -c \"import os\""); ec=$?
+{ [ $ec -eq 0 ] && [ -z "$out" ]; } && ok "python3 -W ignore -c no-net → defer" || bad "python3 -W ignore no-net → defer (out=$out)"
+
 # allowlist exemption still applies to ssh/rsync user@host forms
 arm_fresh; echo "trusted.test" > "$CFG/url-allowlist.txt"
 out=$(egress_for "ssh user@trusted.test \"x\""); ec=$?

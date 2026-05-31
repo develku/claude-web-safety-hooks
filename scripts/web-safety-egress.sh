@@ -36,15 +36,18 @@ NOW=$(date +%s)
 [ $(( NOW - ARMED_AT )) -le "$WINDOW" ] || exit 0  # stale → defer
 
 # Step 2 — is this a network-egress command? (ported sharkyger pattern set + stress-test additions)
-EGRESS_RE='(^|[^a-zA-Z0-9_])(curl|wget|ncat|netcat|nc|scp|sftp|rsync|ssh|aria2c|ftp|lynx|links|w3m|socat|telnet)([^a-zA-Z0-9_-]|$)'
-HTTPIE_RE='(^|[^a-zA-Z0-9_])https?[[:space:]]'
-# Interpreter inline-exec (-c/-e), allowing benign flags (python -u, perl -MLWP::Simple)
-# between the interpreter and the flag, PAIRED with a network-capability token that may
-# appear anywhere in the command (perl carries it in the -M flag; python in the code).
-ONELINER_EXEC_RE='(python3?|node|ruby|perl)([[:space:]]+-[^[:space:]]+)*[[:space:]]+-(c|e)([[:space:]]|$)'
-NET_TOKEN_RE='(urllib|requests|socket|http\.client|httplib|fetch\(|net::http|lwp|open-uri)'
+# Boundaries exclude the path chars . and / (so `~/.ssh/` or `report.scp` is NOT a command
+# match) while still allowing quotes/separators (so `'curl'`, `;curl`) and a leading / (so a
+# path-qualified binary `/usr/bin/curl` still matches — its name is followed by a space).
+EGRESS_RE='(^|[^a-zA-Z0-9_.])(curl|wget|ncat|netcat|nc|scp|sftp|rsync|ssh|aria2c|ftp|lynx|links|w3m|socat|telnet)([^a-zA-Z0-9_./-]|$)'
+HTTPIE_RE='(^|[^a-zA-Z0-9_.])https?[[:space:]]'
+# Interpreter inline-exec (-c/-e), tolerating benign flags between the interpreter and the
+# flag — INCLUDING flags that take a separate-word argument (python -W ignore, perl -I /tmp) —
+# PAIRED with a network-capability token that may appear anywhere in the command.
+ONELINER_EXEC_RE='(python3?|node|ruby|perl)([[:space:]]+-[^[:space:]]+([[:space:]]+[^-[:space:]][^[:space:]]*)?)*[[:space:]]+-(c|e)([[:space:]]|$)'
+NET_TOKEN_RE='(urllib|requests|socket|http\.client|httplib|fetch\(|net[:/]{1,2}http|lwp|open-uri)'
 # openssl s_client is egress; bare openssl (enc/genrsa/dgst) is local crypto — not matched.
-OPENSSL_RE='(^|[^a-zA-Z0-9_])openssl[[:space:]]+s_client'
+OPENSSL_RE='(^|[^a-zA-Z0-9_.])openssl[[:space:]]+s_client'
 # Pure-bash exfil via the /dev/tcp and /dev/udp pseudo-devices (no external binary needed).
 DEVNET_RE='/dev/(tcp|udp)/'
 

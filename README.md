@@ -71,7 +71,7 @@ See [CHANGELOG.md](CHANGELOG.md) for the per-version feature list. Latest is **7
 ```bash
 ./tests/run-tests.sh        # scanner — 34 payload cases
 ./tests/run-cmd-tests.sh    # command helpers — 9 cases
-./tests/run-egress-tests.sh # Layer 6 egress guard — 38 cases
+./tests/run-egress-tests.sh # Layer 6 egress guard — 50 cases
 ```
 
 34 scanner tests (25 single-fetch + 9 multi-fetch sequences for cross-call reassembly) across HIGH/MEDIUM/LOW/legit/reassembly buckets, covering all 8 evasion views, Layer-5 false-positive guards, multi-pattern HIGH combinations, ordering-token reorder attacks, cross-session isolation, letter-boundary splits, 3-char affix-only fragments, and confusable-letter bridges. A second suite (`run-cmd-tests.sh`) covers the report and allow/block helper scripts. A third (`run-egress-tests.sh`) covers the Layer 6 outbound exfiltration guard — arm-state production, the ask/defer decision, allowlist exemption, session isolation, and path-qualified-binary boundary cases. All three run in CI on a Linux + macOS matrix. See [tests/README.md](tests/README.md).
