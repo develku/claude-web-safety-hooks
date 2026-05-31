@@ -46,3 +46,6 @@ jobs:
 
       - name: Run command-helper test suite
         run: ./tests/run-cmd-tests.sh
+
+      - name: Run egress guard test suite
+        run: ./tests/run-egress-tests.sh
