@@ -206,13 +206,14 @@ The full matcher string lives in [`hooks/hooks.json`](../hooks/hooks.json).
 
 A PreToolUse(`Bash`) guard that breaks the **inject→exfil chain**. When Layer 1–5 flag a HIGH-severity injection, the scanner arms a per-session flag (`/tmp/web-safety-session-<id>-armed`). While that flag is fresh (≤ 5 min, the same window as cross-tool correlation), the guard escalates outbound network commands to a user confirmation (`permissionDecision:"ask"`) — the injected instruction cannot self-approve egress; a human decides.
 
-Matched egress command shapes:
+Matched egress command shapes (matching is case-insensitive, and path-qualified forms like `/usr/bin/curl` are caught):
 
-- Transfer tools: `curl`, `wget`, `nc`/`ncat`, `scp`, `sftp`, `aria2c`, `ftp`
+- Transfer / connect tools: `curl`, `wget`, `nc`/`ncat`/`netcat`, `scp`, `sftp`, `rsync`, `ssh`, `aria2c`, `ftp`, `socat`, `telnet`, `openssl s_client`
 - HTTPie: leading `http `/`https `
 - Text browsers: `lynx`, `links`, `w3m`
-- Inline-interpreter network one-liners: `python`/`python3 -c`, `node -e`, `ruby -e`, `perl -e` containing a network primitive (`urllib`, `requests`, `socket`, `http.client`, `fetch(`, `Net::HTTP`, `LWP`, `open-uri`)
+- Pure-bash exfil: `/dev/tcp/…` and `/dev/udp/…` redirection (no external binary required)
+- Inline-interpreter network one-liners: `python`/`python3`, `node`, `ruby`, `perl` invoked with `-c`/`-e` (intervening flags such as `python -u` or `perl -MLWP::Simple` are tolerated) **when** the command also references a network primitive (`urllib`, `requests`, `socket`, `http.client`, `fetch(`, `Net::HTTP`, `LWP`, `open-uri`)
 
 A command whose destination host is in `url-allowlist.txt` is exempt; a command with **no extractable host** (e.g. host hidden in a `python -c` variable) is treated as untrusted and still escalates.
 
-**Documented limitation:** heavy obfuscation (base64-decoded commands, variable-indirected binary names, transfer tools not in the list) can evade the pattern set. The guard arms only after a HIGH detection and only escalates to a confirmation — it is a second line of defense, not a complete egress sandbox.
+**Documented limitation:** heavy obfuscation (base64-decoded commands, variable-indirected/token-split binary names like `c""url`, transfer tools not in the list — e.g. cloud-storage CLIs, `git push`, DNS tunnels) can evade the pattern set. The guard arms only after a HIGH detection and only escalates to a confirmation — it is a second line of defense, not a complete egress sandbox.

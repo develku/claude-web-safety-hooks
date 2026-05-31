@@ -35,17 +35,29 @@ case "$ARMED_AT" in ''|*[!0-9]*) exit 0 ;; esac   # garbage/empty → fail-open 
 NOW=$(date +%s)
 [ $(( NOW - ARMED_AT )) -le "$WINDOW" ] || exit 0  # stale → defer
 
-# Step 2 — is this a network-egress command? (ported sharkyger pattern set)
-EGRESS_RE='(^|[^a-zA-Z0-9_])(curl|wget|ncat|nc|scp|sftp|aria2c|ftp|lynx|links|w3m)([^a-zA-Z0-9_-]|$)'
+# Step 2 — is this a network-egress command? (ported sharkyger pattern set + stress-test additions)
+EGRESS_RE='(^|[^a-zA-Z0-9_])(curl|wget|ncat|netcat|nc|scp|sftp|rsync|ssh|aria2c|ftp|lynx|links|w3m|socat|telnet)([^a-zA-Z0-9_-]|$)'
 HTTPIE_RE='(^|[^a-zA-Z0-9_])https?[[:space:]]'
-ONELINER_RE='(python3?|node|ruby|perl)[[:space:]]+-(c|e)[[:space:]].*(urllib|requests|socket|http\.client|httplib|fetch\(|net::http|lwp|open-uri)'
+# Interpreter inline-exec (-c/-e), allowing benign flags (python -u, perl -MLWP::Simple)
+# between the interpreter and the flag, PAIRED with a network-capability token that may
+# appear anywhere in the command (perl carries it in the -M flag; python in the code).
+ONELINER_EXEC_RE='(python3?|node|ruby|perl)([[:space:]]+-[^[:space:]]+)*[[:space:]]+-(c|e)([[:space:]]|$)'
+NET_TOKEN_RE='(urllib|requests|socket|http\.client|httplib|fetch\(|net::http|lwp|open-uri)'
+# openssl s_client is egress; bare openssl (enc/genrsa/dgst) is local crypto — not matched.
+OPENSSL_RE='(^|[^a-zA-Z0-9_])openssl[[:space:]]+s_client'
+# Pure-bash exfil via the /dev/tcp and /dev/udp pseudo-devices (no external binary needed).
+DEVNET_RE='/dev/(tcp|udp)/'
 
 # Case-insensitive: macOS APFS is case-insensitive, so `CURL`/`HTTP` resolve to
 # the real binaries via PATH and would execute — match them too.
 IS_EGRESS=0
 printf '%s' "$COMMAND" | grep -qEi "$EGRESS_RE"   && IS_EGRESS=1
 printf '%s' "$COMMAND" | grep -qEi "$HTTPIE_RE"   && IS_EGRESS=1
-printf '%s' "$COMMAND" | grep -qEi "$ONELINER_RE" && IS_EGRESS=1
+printf '%s' "$COMMAND" | grep -qEi "$OPENSSL_RE"  && IS_EGRESS=1
+printf '%s' "$COMMAND" | grep -qE  "$DEVNET_RE"   && IS_EGRESS=1
+# interpreter inline-exec AND a network token (their positions are independent)
+if printf '%s' "$COMMAND" | grep -qEi "$ONELINER_EXEC_RE" \
+   && printf '%s' "$COMMAND" | grep -qEi "$NET_TOKEN_RE"; then IS_EGRESS=1; fi
 [ "$IS_EGRESS" = "1" ] || exit 0
 
 # Step 3 — destination-host allowlist exemption.

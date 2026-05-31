@@ -2,6 +2,24 @@
 
 All notable changes to this project. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [7.1.0] — 2026-05-31
+
+Layer 6 hardening from an adversarial stress test (~130 attack vectors across quoting/obfuscation, state/logic, allowlist, and unlisted-binary classes). The stress test confirmed zero quoting-evasion, zero logic/state, and zero allowlist bypasses — and surfaced one precision defect plus a set of low-false-positive coverage gaps.
+
+### Fixed
+
+- **`ONELINER_RE` flag-skip evasion.** The interpreter one-liner detector required `-c`/`-e` *immediately* after the interpreter, so a single benign flag (`python3 -u -c …`, `python3 -B -c …`, `perl -MLWP::Simple -e …`) slipped past it. Reworked into an inline-exec match that tolerates intervening flags, paired with a network-token match that may appear anywhere in the command (so perl's `-MLWP` module flag is now caught, not just `use LWP` in the code body).
+
+### Added
+
+- **Expanded egress coverage** (low-false-positive vectors found in the stress test): `rsync`, `ssh` (remote-exec / reverse-tunnel), `socat`, `telnet`, `netcat`, `openssl s_client`, and pure-bash `/dev/tcp` & `/dev/udp` redirection (no external binary). `scp`/`sftp` were already covered; `rsync`/`ssh` close the obvious sibling gap. Bare `openssl` (local crypto: `enc`/`genrsa`/`dgst`) is deliberately *not* matched — only `s_client`.
+- Regression tests for each new vector plus false-positive guards (`ssh-keygen`, `openssl genrsa`, a non-network `python -c`, `git commit` mentioning a net word, `telnetd`) — egress suite now 38 cases.
+- Docs note: `url-allowlist.txt` entries must be full registrable domains, never a bare public suffix (which would exempt every host under it).
+
+### Notes
+
+- Out of scope by design (documented limitations, not regressions): token-split binary names (`c""url`), cloud-storage CLIs (`aws s3`/`gsutil`/`rclone`), `git push`, and DNS-tunnel exfil. These remain evadable; the guard is defense-in-depth, not a sandbox.
+
 ## [7.0.0] — 2026-05-31
 
 New defense layer. The plugin detected injection in fetched content but did not stop the *next* step — a poisoned page telling Claude to read a secret and POST it out. Layer 6 closes that gap.

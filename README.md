@@ -23,7 +23,7 @@ Six layers, each documented in [docs/patterns.md](docs/patterns.md):
 | **3. Content sanitization** | PostToolUse | HIGH = full redaction; MEDIUM = surgical line-by-line; output capped at 50KB |
 | **4. Cross-tool correlation + reassembly** | PostToolUse | 5-min window; 3+ flagged tools auto-escalate MEDIUM → HIGH. **v6.0+ also detects payloads split across multiple fetches** (`Part 1/3: ignore` + `Part 2/3: previous` + `Part 3/3: instructions` → reassembled match) |
 | **5. Structural verification** | PostToolUse | Code-fence / YAML / JSON / HTML-code / inline-code aware — clears false positives like `assistant:` inside doc snippets without bothering the user |
-| **6. Outbound exfiltration guard** | PreToolUse (Bash) | When a HIGH injection was flagged in this session in the last 5 min, escalates network-egress commands (`curl`/`wget`/`scp`/`nc`/inline `python -c`/`node -e` net one-liners) to a user confirmation — breaking the inject→exfil chain. Trusted destinations via `url-allowlist.txt`; kill switch `WEB_SAFETY_EGRESS_GUARD_DISABLE=1` |
+| **6. Outbound exfiltration guard** | PreToolUse (Bash) | When a HIGH injection was flagged in this session in the last 5 min, escalates network-egress commands (`curl`/`wget`/`scp`/`rsync`/`ssh`/`nc`/`socat`/`/dev/tcp`/inline `python -c`/`node -e` net one-liners) to a user confirmation — breaking the inject→exfil chain. Trusted destinations via `url-allowlist.txt`; kill switch `WEB_SAFETY_EGRESS_GUARD_DISABLE=1` |
 
 ## Install
 
@@ -64,14 +64,14 @@ See [docs/tuning.md](docs/tuning.md) for environment variables, severity tuning,
 
 ## Versions
 
-See [CHANGELOG.md](CHANGELOG.md) for the per-version feature list. Latest is **7.0.0** — Layer 6 outbound exfiltration guard (PreToolUse Bash hook that escalates egress to a confirmation after a HIGH injection flag). **6.3.1** — fix: slash-command `${CLAUDE_PLUGIN_ROOT}` substitution. **6.3.0** — slash commands (`/web-safety-report`, `/web-safety-allow`, `/web-safety-block`) + cross-platform CI test matrix. Previous: **6.2.0** — plugin-only installation; manual install path removed. **6.1.1** — confusable-letter bridge fix from stress testing. **6.1.0** — letter-boundary + affix-only limitation closures. **6.0.0** — cross-call payload reassembly (E8).
+See [CHANGELOG.md](CHANGELOG.md) for the per-version feature list. Latest is **7.1.0** — Layer 6 hardening from an adversarial stress test: fixes an interpreter-flag evasion and expands coverage (`rsync`, `ssh`, `socat`, `telnet`, `openssl s_client`, `/dev/tcp`). **7.0.0** — Layer 6 outbound exfiltration guard (PreToolUse Bash hook that escalates egress to a confirmation after a HIGH injection flag). **6.3.1** — fix: slash-command `${CLAUDE_PLUGIN_ROOT}` substitution. **6.3.0** — slash commands (`/web-safety-report`, `/web-safety-allow`, `/web-safety-block`) + cross-platform CI test matrix. Previous: **6.2.0** — plugin-only installation; manual install path removed. **6.1.1** — confusable-letter bridge fix from stress testing. **6.1.0** — letter-boundary + affix-only limitation closures. **6.0.0** — cross-call payload reassembly (E8).
 
 ## Tests
 
 ```bash
 ./tests/run-tests.sh        # scanner — 34 payload cases
 ./tests/run-cmd-tests.sh    # command helpers — 9 cases
-./tests/run-egress-tests.sh # Layer 6 egress guard — 23 cases
+./tests/run-egress-tests.sh # Layer 6 egress guard — 38 cases
 ```
 
 34 scanner tests (25 single-fetch + 9 multi-fetch sequences for cross-call reassembly) across HIGH/MEDIUM/LOW/legit/reassembly buckets, covering all 8 evasion views, Layer-5 false-positive guards, multi-pattern HIGH combinations, ordering-token reorder attacks, cross-session isolation, letter-boundary splits, 3-char affix-only fragments, and confusable-letter bridges. A second suite (`run-cmd-tests.sh`) covers the report and allow/block helper scripts. A third (`run-egress-tests.sh`) covers the Layer 6 outbound exfiltration guard — arm-state production, the ask/defer decision, allowlist exemption, session isolation, and path-qualified-binary boundary cases. All three run in CI on a Linux + macOS matrix. See [tests/README.md](tests/README.md).
