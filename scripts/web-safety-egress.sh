@@ -46,10 +46,41 @@ printf '%s' "$COMMAND" | grep -qE  "$HTTPIE_RE"   && IS_EGRESS=1
 printf '%s' "$COMMAND" | grep -qEi "$ONELINER_RE" && IS_EGRESS=1
 [ "$IS_EGRESS" = "1" ] || exit 0
 
-# Step 3 — destination-host allowlist exemption is added in Task 3.
+# Step 3 — destination-host allowlist exemption.
+# Extract candidate hosts; exempt ONLY when >=1 host is found AND every host is
+# allowlisted. No extractable host (e.g. hidden in a python -c var) is treated
+# as untrusted → fall through to ASK (exemption requires positive proof).
+CONFIG_DIR="${WEB_SAFETY_CONFIG_DIR:-$HOME/.claude/hooks}"
+ALLOWLIST="$CONFIG_DIR/url-allowlist.txt"
+
+URL_HOSTS=$(printf '%s' "$COMMAND" | grep -oE '[a-zA-Z][a-zA-Z0-9+.-]*://[^[:space:]"]+' \
+  | sed -E 's#^[a-zA-Z][a-zA-Z0-9+.-]*://##; s#^[^@/]*@##; s#[:/].*$##')
+AT_HOSTS=$(printf '%s' "$COMMAND" | grep -oE '[A-Za-z0-9._-]+@[A-Za-z0-9.-]+' \
+  | sed -E 's#^[^@]*@##')
+HOSTS=$(printf '%s\n%s\n' "$URL_HOSTS" "$AT_HOSTS" | tr '[:upper:]' '[:lower:]' | grep -E '[a-z0-9]' | sort -u)
+
+EXEMPT=0
+if [ -n "$HOSTS" ] && [ -f "$ALLOWLIST" ]; then
+  EXEMPT=1   # provisionally exempt until a non-allowlisted host is found
+  while IFS= read -r host; do
+    [ -z "$host" ] && continue
+    matched=0
+    while IFS= read -r domain; do
+      [ -z "$domain" ] && continue
+      case "$domain" in \#*) continue ;; esac
+      domain=$(printf '%s' "$domain" | tr '[:upper:]' '[:lower:]' | tr -d ' ')
+      case "$host" in
+        "$domain"|*."$domain") matched=1; break ;;
+      esac
+    done < "$ALLOWLIST"
+    if [ "$matched" = "0" ]; then EXEMPT=0; break; fi
+  done <<HOSTS_EOF
+$HOSTS
+HOSTS_EOF
+fi
+[ "$EXEMPT" = "1" ] && exit 0
 
 # Step 4 — armed + egress → ASK
-CONFIG_DIR="${WEB_SAFETY_CONFIG_DIR:-$HOME/.claude/hooks}"
 LOG_FILE="$CONFIG_DIR/web-safety.log"
 mkdir -p "$CONFIG_DIR" 2>/dev/null
 SAFE_CMD=$(printf '%s' "$COMMAND" | tr -d '\n' | cut -c1-200)

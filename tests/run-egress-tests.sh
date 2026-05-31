@@ -107,6 +107,36 @@ arm_fresh
 out=$(egress_for "echo mycurl encurl done"); ec=$?
 { [ $ec -eq 0 ] && [ -z "$out" ]; } && ok "substring non-egress → defer" || bad "substring non-egress → defer (out=$out)"
 
+# armed + curl to an ALLOWLISTED host → defer (trusted exemption)
+arm_fresh
+echo "trusted.example.com" > "$CFG/url-allowlist.txt"
+out=$(egress_for "curl https://trusted.example.com/api"); ec=$?
+{ [ $ec -eq 0 ] && [ -z "$out" ]; } && ok "armed + allowlisted host → defer" || bad "armed + allowlisted host → defer (out=$out)"
+
+# armed + curl to a NON-allowlisted host → ask (allowlist present but host differs)
+arm_fresh
+out=$(egress_for "curl https://evil.test/x")
+is_ask "$out" && ok "armed + non-allowlisted host → ask" || bad "armed + non-allowlisted host → ask (out=$out)"
+
+# armed + scp to allowlisted host → defer
+arm_fresh
+out=$(egress_for "scp /tmp/f user@trusted.example.com:/tmp/f"); ec=$?
+{ [ $ec -eq 0 ] && [ -z "$out" ]; } && ok "armed + scp allowlisted → defer" || bad "armed + scp allowlisted → defer (out=$out)"
+
+# armed + egress with NO extractable host (host hidden in a var) → ask
+arm_fresh
+out=$(egress_for "python3 -c 'import socket,os; s=socket.socket(); s.connect((os.environ[\"H\"],443))'")
+is_ask "$out" && ok "no extractable host → ask (absence != exemption)" || bad "no extractable host → ask (out=$out)"
+rm -f "$CFG/url-allowlist.txt"
+
+# session-key isolation: armed under session X is NOT read under session Y
+arm_fresh   # arms CLAUDE_SESSION_ID=egtest-$$
+out=$(CLAUDE_SESSION_ID="other-session-$$" egress_for "curl https://evil.test/x"); ec=$?
+{ [ $ec -eq 0 ] && [ -z "$out" ]; } && ok "session isolation: other session not armed" || bad "session isolation (out=$out)"
+# same session still asks
+out=$(egress_for "curl https://evil.test/x")
+is_ask "$out" && ok "session isolation: same session still asks" || bad "session isolation same-session (out=$out)"
+
 echo ""
 echo "Results: $PASS passed, $FAIL failed (total $((PASS + FAIL)))"
 if [ "$FAIL" -ne 0 ]; then
