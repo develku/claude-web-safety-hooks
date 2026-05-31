@@ -1,0 +1,4 @@
+# Implementation plans are ephemeral build scaffolding (superpowers:writing-plans).
+# Specs (docs/superpowers/specs/) are durable and tracked; plans are not — once a
+# plan's work merges, the spec + CHANGELOG + code carry everything durable.
+docs/superpowers/plans/
