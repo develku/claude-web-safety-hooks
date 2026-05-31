@@ -137,6 +137,11 @@ out=$(CLAUDE_SESSION_ID="other-session-$$" egress_for "curl https://evil.test/x"
 out=$(egress_for "curl https://evil.test/x")
 is_ask "$out" && ok "session isolation: same session still asks" || bad "session isolation same-session (out=$out)"
 
+# hooks.json wires the egress hook on a Bash PreToolUse matcher
+HJSON="$REPO_ROOT/hooks/hooks.json"
+jq -e '.hooks.PreToolUse[] | select(.matcher == "Bash") | .hooks[] | select(.command | test("web-safety-egress.sh"))' "$HJSON" >/dev/null 2>&1 \
+  && ok "hooks.json wires egress hook on Bash" || bad "hooks.json wires egress hook on Bash"
+
 echo ""
 echo "Results: $PASS passed, $FAIL failed (total $((PASS + FAIL)))"
 if [ "$FAIL" -ne 0 ]; then
