@@ -127,6 +127,7 @@ Three slash commands ship with the plugin (auto-discovered on install). All are 
 
 Full per-version detail in [CHANGELOG.md](CHANGELOG.md). Recent releases:
 
+- **7.2.0** — macOS notifications now show the cause (matched patterns / outbound command / blocked URL) in the body + subtitle instead of generic text; osascript sanitizer hardened to strip backslashes (display-only, detection unchanged).
 - **7.1.0** — Layer 6 hardening from an adversarial stress test (~130 vectors): fixes an interpreter-flag evasion (`python3 -u -c …`) and a path-component false positive (`ls ~/.ssh/`), expands coverage (`rsync`, `ssh`, `socat`, `telnet`, `openssl s_client`, `/dev/tcp`); egress suite → 50 cases.
 - **7.0.0** — Layer 6 outbound exfiltration guard: PreToolUse(`Bash`) hook escalating egress to a confirmation after a HIGH injection flag, breaking the inject→exfil chain.
 - **6.3.1** — fix: slash-command `${CLAUDE_PLUGIN_ROOT}` brace-substitution.

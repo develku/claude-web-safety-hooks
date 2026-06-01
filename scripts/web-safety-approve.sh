@@ -18,7 +18,9 @@ ALLOWLIST="$CONFIG_DIR/url-allowlist.txt"
 block_url() {
   mkdir -p "$CONFIG_DIR" 2>/dev/null
   echo "[$(date '+%Y-%m-%d %H:%M:%S')] [PRE-BLOCK] url=$URL reason=$1" >> "$LOG"
-  osascript -e "display notification \"$1\" with title \"🛡️ URL Blocked\" sound name \"Funk\"" >/dev/null 2>&1 &
+  # Show the offending URL as subtitle (truncated, AppleScript metacharacters stripped).
+  SAFE_URL=$(printf '%s' "$URL" | cut -c1-120 | tr -d '"\\')
+  osascript -e "display notification \"$1\" with title \"🛡️ URL Blocked\" subtitle \"${SAFE_URL}\" sound name \"Funk\"" >/dev/null 2>&1 &
   jq -n --arg r "Pre-screening blocked: $1" '{"decision":"block","reason":$r}'
   exit 0
 }

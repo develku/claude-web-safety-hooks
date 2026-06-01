@@ -2,6 +2,27 @@
 
 All notable changes to this project. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [7.2.0] — 2026-06-01
+
+macOS notifications now show *what* triggered them. Previously every alert carried generic text ("Prompt injection detected! Content blocked.") and the cause lived only in the terminal `stopReason` and `web-safety.log` — and an osascript notification can't be clicked to reveal more (its owning app is just Script Editor). The cause is now in the notification itself, no click required.
+
+### Changed
+
+- **Notification body/subtitle now carry the cause** across all three sources:
+  - Scanner HIGH / MEDIUM / ESCALATED / LOW — body lists the matched pattern names (`Patterns: tool_call_faking, llm_control_tokens`); subtitle shows the `TOOL_URL` (or, for the multi-tool escalation, the flagged-tool list).
+  - Egress guard — body shows the actual outbound command that tripped the guard instead of a fixed sentence.
+  - URL pre-screen block — subtitle shows the offending URL alongside the existing block reason.
+- `send_notification` gained an optional 5th `subtitle` argument; existing calls without it render exactly as before.
+
+### Security
+
+- **Hardened the osascript sanitizer to strip backslashes as well as double quotes.** Both are AppleScript string-literal metacharacters; now that untrusted content (web-tool URLs, outbound commands) flows into the subtitle/body, a trailing `\` could have escaped the closing quote and enabled AppleScript injection. Verified neutralized against adversarial `"`/`\` input in all three scripts.
+
+### Notes
+
+- Detection behavior is unchanged — this is display-only; the cause data was already computed at each call site. All suites green (scanner 34, egress 50, cmd 9), and real notifications were fired to confirm rendering + sanitization.
+- For alerts that linger long enough to read, set Script Editor's notification style to "Alert" in System Settings → Notifications. Full matched snippets + content hash remain in the terminal `stopReason` and `web-safety.log`.
+
 ## [7.1.0] — 2026-05-31
 
 Layer 6 hardening from an adversarial stress test (~130 attack vectors across quoting/obfuscation, state/logic, allowlist, and unlisted-binary classes). The stress test confirmed zero quoting-evasion, zero logic/state, and zero allowlist bypasses — and surfaced one precision defect plus a set of low-false-positive coverage gaps.

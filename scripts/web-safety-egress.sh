@@ -103,7 +103,10 @@ mkdir -p "$CONFIG_DIR" 2>/dev/null
 SAFE_CMD=$(printf '%s' "$COMMAND" | tr -d '\n' | cut -c1-200)
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] [EGRESS-ASK] session=${SESSION_ID} cmd=\"${SAFE_CMD}\"" >> "$LOG_FILE" 2>/dev/null
 
-osascript -e 'display notification "Outbound command after a flagged injection — review required" with title "🛡️ Exfiltration Guard" sound name "Sosumi"' >/dev/null 2>&1 &
+# Show the triggering command as the cause. Strip AppleScript metacharacters
+# (" and \) from the untrusted command before embedding it in the notification.
+NOTIFY_CMD=$(printf '%s' "$SAFE_CMD" | tr -d '"\\')
+osascript -e "display notification \"${NOTIFY_CMD}\" with title \"🛡️ Exfiltration Guard\" subtitle \"Outbound command after flagged injection\" sound name \"Sosumi\"" >/dev/null 2>&1 &
 
 REASON="⚠️ Outbound network command issued after a HIGH-severity prompt-injection was flagged in this session within the last 5 minutes. This may be an exfiltration attempt directed by injected web content. Approve only if YOU initiated this request."
 
