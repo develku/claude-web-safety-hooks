@@ -67,6 +67,35 @@ grep -q "rm" "$CFG/url-allowlist.txt" 2>/dev/null \
 "$LISTCTL" bogus github.com >/dev/null 2>&1; ec=$?
 [ $ec -ne 0 ] && ok "listctl: rejects unknown list name" || bad "listctl: rejects unknown list name"
 
+# --- listctl: re-adding still prints the idempotent notice (#15: atomic add
+# preserves the UX message + early exit) ---
+out=$("$LISTCTL" allow github.com 2>&1)
+printf '%s' "$out" | grep -qi "already in" \
+  && ok "listctl: re-add prints 'already in' notice" || bad "listctl: re-add notice ($out)"
+
+# --- listctl: concurrent adds dedupe atomically (#15: temp+mv replaces the
+# TOCTOU check-then-append) ---
+for i in 1 2 3 4 5 6 7 8; do "$LISTCTL" allow concurrent.test >/dev/null 2>&1 & done
+wait
+n=$(grep -cxF "concurrent.test" "$CFG/url-allowlist.txt" 2>/dev/null)
+[ "${n:-0}" -eq 1 ] && ok "listctl: concurrent adds dedupe atomically (n=$n)" || bad "listctl: concurrent dedupe (n=${n:-0})"
+
+# --- approve: allowlist honors a final entry with NO trailing newline (#15) ---
+# The bare `while read` loop dropped the last line when the file lacked a final
+# newline; `|| [ -n "$domain" ]` recovers it (matches the shared lib's reader).
+CFG_NL=$(mktemp -d)
+printf 'example.com\nfoo.zip' > "$CFG_NL/url-allowlist.txt"   # deliberately NO trailing newline
+is_approve "$(WEB_SAFETY_CONFIG_DIR="$CFG_NL" approve_url 'https://foo.zip/')" \
+  && ok "approve: allowlist honors last entry without trailing newline" \
+  || bad "approve: allowlist last-entry-no-newline"
+# Control: the same high-risk-TLD URL is soft-blocked when NOT allowlisted.
+CFG_NL2=$(mktemp -d)
+printf 'example.com\n' > "$CFG_NL2/url-allowlist.txt"
+is_block "$(WEB_SAFETY_CONFIG_DIR="$CFG_NL2" approve_url 'https://foo.zip/')" \
+  && ok "approve: high-risk TLD blocked when not allowlisted (control)" \
+  || bad "approve: high-risk TLD control"
+rm -rf "$CFG_NL" "$CFG_NL2"
+
 # --- report: missing log -> friendly message, exit 0 ---
 CFG2=$(mktemp -d)
 out=$(WEB_SAFETY_CONFIG_DIR="$CFG2" "$REPORT" 2>&1); ec=$?

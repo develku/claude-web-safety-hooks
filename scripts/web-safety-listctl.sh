@@ -49,5 +49,15 @@ if [ -f "$FILE" ] && grep -qxF "$DOMAIN" "$FILE" 2>/dev/null; then
   exit 0
 fi
 
-printf '%s\n' "$DOMAIN" >> "$FILE"
+# Atomic add: rebuild the list (minus DOMAIN) + append DOMAIN into a temp file on
+# the same filesystem, then rename into place. The bare check-then-append above
+# had a TOCTOU window — two concurrent invocations both pass the grep, both append
+# → duplicate; rebuilding dedups so concurrency can't duplicate (idempotent contract).
+TMPFILE=$(mktemp "${FILE}.XXXXXX") || exit 1
+trap 'rm -f "$TMPFILE"' EXIT
+{
+  [ -f "$FILE" ] && grep -vxF "$DOMAIN" "$FILE" 2>/dev/null || true
+  printf '%s\n' "$DOMAIN"
+} > "$TMPFILE" || exit 1
+mv "$TMPFILE" "$FILE" || exit 1
 echo "added to ${LIST}list: $DOMAIN  ->  $FILE"

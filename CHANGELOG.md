@@ -2,6 +2,58 @@
 
 All notable changes to this project. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [7.7.0] — 2026-06-02
+
+Minor roll-up (PR 5 of the staged review) — the `#15` cluster of small
+correctness, portability, and concurrency items. This completes all 15 findings
+from the full-codebase review. Each item was investigated and adversarially
+verified (real vs. already-fixed vs. false-finding) before any change.
+
+### Fixed (correctness)
+
+- **Multi-technique leetspeak now fully reported.** The leetspeak loop exited on
+  the *first* match, so a page combining several obfuscated payloads
+  (`1gn0r3 pr3v10us 1nstruct10ns … byp455 54f3ty … j41lbr34k`) surfaced only one.
+  The early `break` is removed; benign content already ran the full loop, so this
+  only adds work on the rare attack path.
+- **Escalation tool list renders correctly.** `SESSION_FLAGGED_TOOLS` joined with
+  `tr '\n' ', '`, which collapses to `,` (POSIX `tr` ignores the extra char in the
+  2-char set), so the cross-tool escalation message read `WebFetchExa`. It now
+  joins with a real `, ` separator.
+
+### Changed (concurrency / robustness)
+
+- **`listctl` add is now atomic.** The check-then-append had a TOCTOU window
+  (concurrent `listctl allow X` could duplicate an entry, violating the script's
+  idempotency contract). It now rebuilds the list (deduped) into a same-filesystem
+  temp file and renames it into place; the friendly "already in list" notice is
+  preserved.
+- **`SESSION_STATE` prune is lock-guarded.** The per-session hit-tracking file's
+  read-modify-write prune now takes a `mkdir`-lock, mirroring the E8 fragment
+  prune, so two concurrent same-session scanners can't clobber each other's
+  rewrite. Fail-safe: if the lock is held the prune is skipped (the cutoff-filtered
+  hit count is unaffected, so escalation stays correct).
+- **Allowlist honors a final entry without a trailing newline.** `web-safety-approve.sh`
+  used a bare `while read` loop that drops the last line when the file lacks a final
+  newline; it now uses `|| [ -n "$domain" ]` (matching the shared lib's reader).
+
+### Removed (dead code)
+
+- Dead `VERIFIER_TIMEOUT=0.5` (the real verifier timeout is the `perl alarm`
+  wrapper; the variable was unused and misleading).
+- Dead `: > "${SESSION_FRAGMENTS}.tmp"` pre-truncate before the fragment append
+  (nothing read that scratch file).
+
+### Notes
+
+- The escalation-count threshold (`SESSION_HITS >= 2` ⇒ "3+ tools") was **verified
+  correct** (the current call is the 3rd) — flagged as a candidate, kept unchanged.
+- `date +%s%N` for the E8 fragment sequence id is non-portable on BSD/macOS, but
+  the field is write-only metadata never parsed back (a comment now documents this).
+- Test-harness session cleanup switched to `rm -rf` so the per-session `.lock`
+  directories are reclaimed.
+- Suites: scanner 47, cmd 49, egress 71 — all green.
+
 ## [7.6.0] — 2026-06-02
 
 Detection-recall hardening (PR 4 of the staged review): the two remaining HIGH

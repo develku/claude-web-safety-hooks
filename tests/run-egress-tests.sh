@@ -20,10 +20,10 @@ export CLAUDE_SESSION_ID="egtest-$$"
 ARM="/tmp/web-safety-session-${CLAUDE_SESSION_ID}-armed"
 CFG=$(mktemp -d)
 export WEB_SAFETY_CONFIG_DIR="$CFG"
-cleanup() { rm -rf "$CFG"; rm -f /tmp/web-safety-session-"${CLAUDE_SESSION_ID}"-* /tmp/web-safety-scanner-last-notify; }
+cleanup() { rm -rf "$CFG"; rm -rf /tmp/web-safety-session-"${CLAUDE_SESSION_ID}"-* /tmp/web-safety-scanner-last-notify; }
 trap cleanup EXIT
 
-reset_state() { rm -f /tmp/web-safety-session-"${CLAUDE_SESSION_ID}"-* /tmp/web-safety-scanner-last-notify; }
+reset_state() { rm -rf /tmp/web-safety-session-"${CLAUDE_SESSION_ID}"-* /tmp/web-safety-scanner-last-notify; }
 
 # ── Producer: scanner arms on HIGH ───────────────────────────────────────────
 reset_state

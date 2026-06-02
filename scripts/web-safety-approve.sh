@@ -85,7 +85,7 @@ if [ -n "$URL" ]; then
   if [ -f "$ALLOWLIST" ]; then
     HOST=$(echo "$URL" | sed -E 's|^https?://||; s|/.*||; s|:.*||' | tr '[:upper:]' '[:lower:]')
     if [ -n "$HOST" ]; then
-      while IFS= read -r domain; do
+      while IFS= read -r domain || [ -n "$domain" ]; do
         [ -z "$domain" ] && continue
         case "$domain" in \#*) continue ;; esac
         domain=$(echo "$domain" | tr '[:upper:]' '[:lower:]' | tr -d ' ')
