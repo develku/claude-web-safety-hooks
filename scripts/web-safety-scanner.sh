@@ -111,8 +111,16 @@ if [ -f "$SESSION_STATE" ]; then
   NOW=$(date +%s)
   # Keep only recent entries, count only H (non-cleared) hits for escalation
   SESSION_HITS=$(awk -v cutoff=$((NOW - SESSION_WINDOW)) '$1 >= cutoff && $4 != "C"' "$SESSION_STATE" 2>/dev/null | wc -l | tr -d ' ')
-  # Prune old entries in place (keep all statuses for audit, just remove expired)
-  awk -v cutoff=$((NOW - SESSION_WINDOW)) '$1 >= cutoff' "$SESSION_STATE" > "${SESSION_STATE}.tmp" 2>/dev/null && mv "${SESSION_STATE}.tmp" "$SESSION_STATE"
+  # Prune old entries in place (keep all statuses for audit, just remove expired).
+  # Guard the read-modify-write with a mkdir-lock (mirrors the E8 fragment prune)
+  # so two concurrent same-session scanners can't clobber each other's rewrite.
+  # Fail-safe: if the lock is held, skip pruning this cycle — the cutoff filter on
+  # the SESSION_HITS count above is unaffected, so escalation stays correct; the
+  # file just isn't trimmed until a later run acquires the lock.
+  if mkdir "${SESSION_STATE}.lock" 2>/dev/null; then
+    awk -v cutoff=$((NOW - SESSION_WINDOW)) '$1 >= cutoff' "$SESSION_STATE" > "${SESSION_STATE}.tmp" 2>/dev/null && mv "${SESSION_STATE}.tmp" "$SESSION_STATE"
+    rmdir "${SESSION_STATE}.lock" 2>/dev/null
+  fi
 fi
 
 # record_session_hit: append timestamp + tool + URL + status to session state
@@ -136,7 +144,7 @@ arm_egress_guard() {
 SESSION_FLAGGED_TOOLS=""
 if [ -f "$SESSION_STATE" ] && [ "$SESSION_HITS" -gt 0 ]; then
   NOW=$(date +%s)
-  SESSION_FLAGGED_TOOLS=$(awk -v cutoff=$((NOW - SESSION_WINDOW)) '$1 >= cutoff && $4 != "C" {print $2}' "$SESSION_STATE" 2>/dev/null | sort -u | tr '\n' ', ' | sed 's/,$//')
+  SESSION_FLAGGED_TOOLS=$(awk -v cutoff=$((NOW - SESSION_WINDOW)) '$1 >= cutoff && $4 != "C" {print $2}' "$SESSION_STATE" 2>/dev/null | sort -u | sed 's/$/,/' | tr '\n' ' ' | sed 's/, $//')
 fi
 
 # ESCALATION: if 3+ non-cleared tool calls triggered in 5 minutes, escalate MEDIUM→HIGH
@@ -1203,11 +1211,14 @@ LEET_PATTERNS=(
   "jailbreak"
 )
 
+# No early break: a single page can carry several leetspeak-obfuscated patterns
+# (e.g. "1gn0r3 ... byp455 s4f3ty ... j41lbr34k"); report every one, not just the
+# first. Benign content already runs the full loop (nothing matches), so dropping
+# the break only adds work on the rare attack path. Dedup happens downstream.
 for pattern in "${LEET_PATTERNS[@]}"; do
   if echo "$LEET_OUTPUT" | grep -qF -- "$pattern" 2>/dev/null; then
     if ! echo "$LOWER_OUTPUT" | grep -qF -- "$pattern" 2>/dev/null; then
       FOUND_MEDIUM+=("leetspeak obfuscation detected: $pattern")
-      break
     fi
   fi
 done
@@ -1324,7 +1335,6 @@ fi
 # =============================================================================
 VERIFY_CONTEXT_ENABLED="${VERIFY_CONTEXT_ENABLED:-true}"
 VERIFIER_SCRIPT="$HOOKS_DIR/web-safety-verify-context.sh"
-VERIFIER_TIMEOUT=0.5  # 500ms fail-closed timeout
 
 if [ "$VERIFY_CONTEXT_ENABLED" = "true" ] && [ ${#UNIQUE_MED[@]} -gt 0 ] && [ ${#UNIQUE_HIGH[@]} -eq 0 ] && [ -x "$VERIFIER_SCRIPT" ]; then
   # Build set of verifiable patterns (MED_GENERIC_DELIMITERS only)
@@ -1694,10 +1704,13 @@ if [ "$e8_should_store" = "true" ]; then
   # parses as an illegal option ("-_") on macOS.
   E8_B64=$(printf '%s' "$E8_EXCERPT" | base64 | tr -d '\n')
   E8_URL_HASH=$(printf '%s' "${TOOL_URL:-no-url}" | shasum -a 256 2>/dev/null | cut -c1-12)
+  # E8_SEQ is a per-fragment tiebreaker stored as TSV metadata; it is not parsed
+  # back by any reassembly logic. `date +%s%N` is non-portable (BSD/macOS date has
+  # no %N and emits a literal "N"), but since the field is never read, the only
+  # effect is a cosmetic non-numeric suffix; the `$$` fallback covers an empty result.
   E8_SEQ=$(date +%s%N 2>/dev/null | tail -c 7 | head -c 6)
   [ -z "$E8_SEQ" ] && E8_SEQ=$$
   if e8_lock; then
-    : > "${SESSION_FRAGMENTS}.tmp" 2>/dev/null
     # Append new line
     printf '%s\t%s\t%s\t%s\tF\t%s\n' \
       "$(date +%s)" "$E8_SEQ" "$TOOL_NAME" "$E8_URL_HASH" "$E8_B64" \
