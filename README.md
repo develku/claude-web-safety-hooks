@@ -23,7 +23,7 @@ Six layers, each documented in [docs/patterns.md](docs/patterns.md):
 | **3. Content sanitization** | PostToolUse | HIGH = full redaction; MEDIUM = surgical line-by-line; output capped at 50KB |
 | **4. Cross-tool correlation + reassembly** | PostToolUse | 5-min window; 3+ flagged tools auto-escalate MEDIUM → HIGH. **v6.0+ also detects payloads split across multiple fetches** (`Part 1/3: ignore` + `Part 2/3: previous` + `Part 3/3: instructions` → reassembled match) |
 | **5. Structural verification** | PostToolUse | Code-fence / YAML / JSON / HTML-code / inline-code aware — clears false positives like `assistant:` inside doc snippets without bothering the user |
-| **6. Outbound exfiltration guard** | PreToolUse (Bash) | When a HIGH injection was flagged in this session in the last 5 min, escalates network-egress commands (`curl`/`wget`/`scp`/`rsync`/`ssh`/`nc`/`socat`/`/dev/tcp`/inline `python -c`/`node -e` net one-liners) to a user confirmation — breaking the inject→exfil chain. Trusted destinations via `url-allowlist.txt`; kill switch `WEB_SAFETY_EGRESS_GUARD_DISABLE=1` |
+| **6. Outbound exfiltration guard** | PreToolUse (Bash + web-fetch) | When a HIGH injection was flagged in this session in the last 5 min, escalates outbound data flows to a user confirmation — breaking the inject→exfil chain. Covers network-egress Bash commands (`curl`/`wget`/`scp`/`rsync`/`ssh`/`nc`/`socat`/`/dev/tcp`/inline `python -c`/`node -e`) **and** web-fetch tools (a fetch to a non-allowlisted host while armed — the most natural post-injection exfil). Trusted destinations via `url-allowlist.txt`, but an *upload* to an allowlisted host is not exempted; kill switch `WEB_SAFETY_EGRESS_GUARD_DISABLE=1` |
 
 ## Architecture
 
@@ -40,7 +40,7 @@ web-safety/
 │   ├── web-safety-listctl.sh         # backs /web-safety-allow + /web-safety-block
 │   └── web-safety-report.sh          # backs /web-safety-report
 ├── commands/                         # 3 user-invoked slash commands (auto-discovered)
-├── tests/                            # 3 suites · 93 cases · Linux+macOS CI
+├── tests/                            # 3 suites · 167 cases · Linux+macOS CI
 └── docs/                             # patterns.md, tuning.md, design specs
 ```
 
@@ -48,9 +48,11 @@ web-safety/
 
 | Event | Matcher | Script | Layer(s) |
 |---|---|---|---|
-| **PreToolUse** | `WebFetch` / `WebSearch` / MCP web tools | `web-safety-approve.sh` | 1 |
+| **PreToolUse** | `WebFetch` / `WebSearch` / MCP web tools | `web-safety-approve.sh` → `web-safety-egress.sh` | 1, 6 |
 | **PreToolUse** | `Bash` | `web-safety-egress.sh` | 6 |
 | **PostToolUse** | `WebFetch` / `WebSearch` / MCP web tools | `web-safety-scanner.sh` (10s timeout) | 2–5 (+ arms 6) |
+
+Layer 6 runs on the web matcher as well as `Bash` (since v7.5.0): while armed, an outbound fetch to a non-allowlisted host is escalated just like a Bash egress command.
 
 ### Runtime data flow
 
@@ -69,9 +71,9 @@ Hooks are short-lived processes with no shared memory, so cross-step state lives
                                    ├─► /tmp/web-safety-session-<id>-fragments  (split-payload reassembly → Layer 4)
                                    └─► /tmp/web-safety-session-<id>-armed       (timestamp, on HIGH → arms Layer 6)
                                                           │
- later: a Bash command runs ──► PreToolUse(Bash)         │ reads
-                            [Layer 6] egress.sh ─────────┘
-                                   armed + egress + non-allowlisted host → permissionDecision:"ask"
+ later: a Bash command OR a web fetch ──► PreToolUse(Bash/web)  │ reads
+                            [Layer 6] egress.sh ───────────────────┘
+                                   armed + egress/outbound-fetch + non-allowlisted host → permissionDecision:"ask"
 ```
 
 User-side config and audit live under `~/.claude/hooks/`: `url-allowlist.txt`, `url-blocklist.txt`, and the append-only `web-safety.log`.
@@ -127,6 +129,11 @@ Three slash commands ship with the plugin (auto-discovered on install). All are 
 
 Full per-version detail in [CHANGELOG.md](CHANGELOG.md). Recent releases:
 
+- **7.7.0** — Minor roll-up completing a 15-finding review: leetspeak loop now reports every obfuscated pattern (not just the first), escalation tool list renders with a real `, ` separator, `listctl` add is atomic, the `SESSION_STATE` prune is lock-guarded, and the allowlist honors a final entry without a trailing newline.
+- **7.6.0** — Closed two HIGH false-negatives: base64 detection strengthened (CR/LF-stripping, lower threshold, decode-vs-real-patterns) and cross-call reassembly evasions (head+tail excerpt, completing-fragment capture, full 14-category lexicon). Affix index made per-word + fired-set de-dup after the gate found an FP-storm.
+- **7.5.0** — Layer 6 now also guards the **web-fetch** channel (fetch to a non-allowlisted host while armed) and adopts the shared host library; upload-aware allowlist (an upload *to* an allowlisted host is no longer exempt).
+- **7.4.0** — Object-shaped `tool_response` is now scanned, broadened MCP tool matcher, false-positive fixes, and audit-log→report injection closed (control-char-stripped URLs, backtick neutralization).
+- **7.3.0** — Closed an SSRF pre-screen bypass (decimal/hex/octal-IP, userinfo, `*.internal`, metadata hosts via a canonical host normalizer), a large-input fail-open (input cap + truncation note), a no-op hex HTML-entity decode, and a verifier regex flaw that auto-cleared genuine `[INST]` injections; test harness hardened.
 - **7.2.0** — macOS notifications now show the cause (matched patterns / outbound command / blocked URL) in the body + subtitle instead of generic text; osascript sanitizer hardened to strip backslashes (display-only, detection unchanged).
 - **7.1.0** — Layer 6 hardening from an adversarial stress test (~130 vectors): fixes an interpreter-flag evasion (`python3 -u -c …`) and a path-component false positive (`ls ~/.ssh/`), expands coverage (`rsync`, `ssh`, `socat`, `telnet`, `openssl s_client`, `/dev/tcp`); egress suite → 50 cases.
 - **7.0.0** — Layer 6 outbound exfiltration guard: PreToolUse(`Bash`) hook escalating egress to a confirmation after a HIGH injection flag, breaking the inject→exfil chain.
@@ -140,12 +147,12 @@ Full per-version detail in [CHANGELOG.md](CHANGELOG.md). Recent releases:
 ## Tests
 
 ```bash
-./tests/run-tests.sh        # scanner — 34 payload cases
-./tests/run-cmd-tests.sh    # command helpers — 9 cases
-./tests/run-egress-tests.sh # Layer 6 egress guard — 50 cases
+./tests/run-tests.sh        # scanner — 47 cases
+./tests/run-cmd-tests.sh    # command helpers — 49 cases
+./tests/run-egress-tests.sh # Layer 6 egress guard — 71 cases
 ```
 
-34 scanner tests (25 single-fetch + 9 multi-fetch sequences for cross-call reassembly) across HIGH/MEDIUM/LOW/legit/reassembly buckets, covering all 8 evasion views, Layer-5 false-positive guards, multi-pattern HIGH combinations, ordering-token reorder attacks, cross-session isolation, letter-boundary splits, 3-char affix-only fragments, and confusable-letter bridges. A second suite (`run-cmd-tests.sh`) covers the report and allow/block helper scripts. A third (`run-egress-tests.sh`) covers the Layer 6 outbound exfiltration guard — arm-state production, the ask/defer decision, allowlist exemption, session isolation, and path-qualified-binary boundary cases. All three run in CI on a Linux + macOS matrix. See [tests/README.md](tests/README.md).
+47 scanner cases (single-fetch payloads + multi-fetch reassembly sequences + enforcement / large-input / performance assertions) across HIGH/MEDIUM/LOW/legit/reassembly buckets, covering all 8 evasion views, base64-encoded payloads, hex/decimal HTML-entity decoding, Layer-5 false-positive guards, multi-pattern HIGH combinations, ordering-token reorder attacks, cross-session isolation, letter-boundary and tail-split reassembly, already-fired suppression, 3-char affix-only fragments, confusable-letter bridges, multi-technique leetspeak, and a 256 KB-page performance budget. A second suite (`run-cmd-tests.sh`) covers the report and allow/block helper scripts — including atomic/concurrent list adds, allowlist normalization, and SSRF hard-block classes through the pre-screen. A third (`run-egress-tests.sh`) covers the Layer 6 outbound exfiltration guard across **both** the Bash and web-fetch channels — arm-state production, the ask/defer decision, allowlist exemption and upload-aware non-exemption, session isolation, and path-qualified-binary boundary cases. All three run in CI on a Linux + macOS matrix. See [tests/README.md](tests/README.md).
 
 ## License
 

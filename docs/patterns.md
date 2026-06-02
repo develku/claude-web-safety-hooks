@@ -202,11 +202,13 @@ Both PreToolUse and PostToolUse hooks trigger on the same matcher set:
 
 The full matcher string lives in [`hooks/hooks.json`](../hooks/hooks.json).
 
-## Layer 6 — Outbound egress vectors (v7.0+)
+## Layer 6 — Outbound egress vectors (v7.0+, web-fetch channel v7.5+)
 
-A PreToolUse(`Bash`) guard that breaks the **inject→exfil chain**. When Layer 1–5 flag a HIGH-severity injection, the scanner arms a per-session flag (`/tmp/web-safety-session-<id>-armed`). While that flag is fresh (≤ 5 min, the same window as cross-tool correlation), the guard escalates outbound network commands to a user confirmation (`permissionDecision:"ask"`) — the injected instruction cannot self-approve egress; a human decides.
+A PreToolUse guard — on **both** the `Bash` matcher and the web-fetch matcher (`WebFetch`/`WebSearch`/MCP web tools) — that breaks the **inject→exfil chain**. When Layer 1–5 flag a HIGH-severity injection, the scanner arms a per-session flag (`/tmp/web-safety-session-<id>-armed`). While that flag is fresh (≤ 5 min, the same window as cross-tool correlation), the guard escalates outbound data flows to a user confirmation (`permissionDecision:"ask"`) — the injected instruction cannot self-approve egress; a human decides.
 
-Matched egress command shapes (matching is case-insensitive, and path-qualified forms like `/usr/bin/curl` are caught):
+The **web-fetch channel** (v7.5+) covers the most natural post-injection exfil: while armed, an outbound fetch whose host does not positively resolve to an allowlisted domain is escalated. It **fails closed** — a fetch tool whose destination lives in a field the guard doesn't parse (a `urls[]` array, a search `.query`, …) is escalated rather than passed.
+
+Matched Bash egress command shapes (matching is case-insensitive, and path-qualified forms like `/usr/bin/curl` are caught):
 
 - Transfer / connect tools: `curl`, `wget`, `nc`/`ncat`/`netcat`, `scp`, `sftp`, `rsync`, `ssh`, `aria2c`, `ftp`, `socat`, `telnet`, `openssl s_client`
 - HTTPie: leading `http `/`https `
@@ -214,6 +216,6 @@ Matched egress command shapes (matching is case-insensitive, and path-qualified 
 - Pure-bash exfil: `/dev/tcp/…` and `/dev/udp/…` redirection (no external binary required)
 - Inline-interpreter network one-liners: `python`/`python3`, `node`, `ruby`, `perl` invoked with `-c`/`-e` (intervening flags such as `python -u` or `perl -MLWP::Simple` are tolerated) **when** the command also references a network primitive (`urllib`, `requests`, `socket`, `http.client`, `fetch(`, `Net::HTTP`, `LWP`, `open-uri`)
 
-A command whose destination host is in `url-allowlist.txt` is exempt; a command with **no extractable host** (e.g. host hidden in a `python -c` variable) is treated as untrusted and still escalates.
+A command whose destination host is in `url-allowlist.txt` is exempt — **unless it uploads data** (`-d`/`--data*`/`-F`/`--form*`/`-T`/`--upload-file`/`--json`/`--url-query`/wget `--post-data`/`--post-file`/`--body-*`) to that host, since exfil to a trusted host is still exfil (v7.5+). A pure transfer (`scp`/`rsync`) *to* an allowlisted host stays exempt — the user explicitly trusted that destination. A command with **no extractable host** (e.g. host hidden in a `python -c` variable) is treated as untrusted and still escalates.
 
 **Documented limitation:** heavy obfuscation (base64-decoded commands, variable-indirected/token-split binary names like `c""url`, transfer tools not in the list — e.g. cloud-storage CLIs, `git push`, DNS tunnels) can evade the pattern set. The guard arms only after a HIGH detection and only escalates to a confirmation — it is a second line of defense, not a complete egress sandbox.
