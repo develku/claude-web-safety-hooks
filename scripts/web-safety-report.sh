@@ -70,7 +70,9 @@ TOOLS=$(printf '%s\n' "$SRC" | grep -oE 'tool=[^ ]+' | sed 's/^tool=//' | sort |
 if [ -n "$TOOLS" ]; then
   echo "| Tool | Count |"
   echo "|---|---|"
-  printf '%s\n' "$TOOLS" | while read -r n t; do printf '| %s | %s |\n' "$t" "$n"; done
+  # Strip '|' from the cell value (attacker-influenceable tool name) so it can't
+  # inject a Markdown table column (#12).
+  printf '%s\n' "$TOOLS" | while read -r n t; do printf '| %s | %s |\n' "$(printf '%s' "$t" | tr -d '|')" "$n"; done
 else
   echo "_none recorded_"
 fi
@@ -82,7 +84,7 @@ HOSTS=$(printf '%s\n' "$SRC" | grep -oE 'url=https?://[^ /]+' | sed -E 's|url=ht
 if [ -n "$HOSTS" ]; then
   echo "| Host | Count |"
   echo "|---|---|"
-  printf '%s\n' "$HOSTS" | while read -r n h; do printf '| %s | %s |\n' "$h" "$n"; done
+  printf '%s\n' "$HOSTS" | while read -r n h; do printf '| %s | %s |\n' "$(printf '%s' "$h" | tr -d '|')" "$n"; done
 else
   echo "_none recorded_"
 fi
@@ -91,5 +93,8 @@ echo
 echo "## Most recent"
 echo
 echo '```'
-printf '%s\n' "$SRC" | grep . | tail -8
+# Log lines carry attacker-influenced URLs; a backtick run could close this
+# fence and inject markdown into the rendered report. Replace backticks with a
+# look-alike so the fence can't be broken out of (#12).
+printf '%s\n' "$SRC" | grep . | tail -8 | tr '`' "'"
 echo '```'

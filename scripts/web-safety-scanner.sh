@@ -151,7 +151,20 @@ fi
 INPUT=$(cat)
 TOOL_NAME=$(echo "$INPUT" | jq -r '.tool_name // "unknown"')
 TOOL_URL=$(echo "$INPUT" | jq -r '.tool_input.url // .tool_input.URL // ""')
-TOOL_OUTPUT=$(echo "$INPUT" | jq -r '.tool_response // .tool_output // ""')
+# Strip control chars + bound length: TOOL_URL is attacker-influenced and flows
+# into the audit log; a raw newline would forge log lines (#12).
+TOOL_URL=$(printf '%s' "$TOOL_URL" | tr -d '\000-\037\177' | cut -c1-256)
+# tool_response may be a STRING or an OBJECT (real WebFetch/MCP tools return
+# objects). For an object, recursively flatten its string leaves to SPACE-joined
+# text so substring patterns aren't split by JSON escaping, and so a payload
+# fragmented across sibling fields stays adjacent for the line-oriented grep
+# views (#9); for a string, take it as-is.
+TOOL_OUTPUT=$(echo "$INPUT" | jq -r '
+  (.tool_response // .tool_output) as $r
+  | if   ($r | type) == "string" then $r
+    elif ($r | type) == "object" or ($r | type) == "array" then [ $r | .. | strings ] | join(" ")
+    elif $r == null then ""
+    else ($r | tostring) end' 2>/dev/null)
 
 
 if [ -z "$TOOL_OUTPUT" ]; then

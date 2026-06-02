@@ -149,6 +149,63 @@ is_approve "$(ssa 'https://example.com/page')" \
   && ok "approve: legit domain approved (no FP)" || bad "approve: legit domain approved"
 rm -rf "$CFG4"
 
+# --- approve: false-positive guards (#10) ---
+# A blank/comment-only blocklist must NOT block every URL (BSD grep -F -f on an
+# empty pattern set matches all lines).
+CFG5=$(mktemp -d); printf '\n   \n# comment only\n' > "$CFG5/url-blocklist.txt"
+is_approve "$(WEB_SAFETY_CONFIG_DIR="$CFG5" approve_url 'https://github.com/x')" \
+  && ok "approve: blank/comment-only blocklist does not block all" \
+  || bad "approve: blank/comment-only blocklist blocked a legit URL"
+printf 'evil.test\n' > "$CFG5/url-blocklist.txt"
+is_block "$(WEB_SAFETY_CONFIG_DIR="$CFG5" approve_url 'https://evil.test/x')" \
+  && ok "approve: real blocklist entry still blocks" || bad "approve: real blocklist entry still blocks"
+rm -rf "$CFG5"
+# A WebSearch free-text query mentioning a URL-ish token must NOT be URL-blocked.
+aq() { jq -nc --arg q "$1" '{tool_name:"WebSearch", tool_input:{query:$q}}' | WEB_SAFETY_CONFIG_DIR="$(mktemp -d)" "$APPROVE"; }
+is_approve "$(aq 'how to block localhost SSRF and .tk domains')" \
+  && ok "approve: WebSearch query not treated as URL" || bad "approve: WebSearch query not treated as URL"
+is_approve "$(aq 'fetch http://127.0.0.1 docs for testing')" \
+  && ok "approve: query mentioning internal URL not blocked" || bad "approve: query mentioning internal URL not blocked"
+
+# --- log -> report injection hardening (#12) ---
+# report.sh must neutralize backticks in logged content so a logged URL can't
+# close the Markdown code fence and inject markdown.
+CFG7=$(mktemp -d)
+printf '[2026-05-01 10:00:00] [PRE-BLOCK] url=https://x/```injected reason=t\n' > "$CFG7/web-safety.log"
+rep=$(WEB_SAFETY_CONFIG_DIR="$CFG7" "$REPORT" 2>&1)
+printf '%s' "$rep" | grep -qF "https://x/'''injected" \
+  && ok "report: backticks in log content neutralized (no fence breakout)" \
+  || bad "report: log backticks not neutralized"
+rm -rf "$CFG7"
+# approve.sh must not let a newline in the URL forge a second log line.
+CFG8=$(mktemp -d)
+WEB_SAFETY_CONFIG_DIR="$CFG8" approve_url "$(printf 'http://x/%s' $'\n[2099-01-01 00:00:00] [FORGED] url=evil reason=x')" >/dev/null 2>&1
+lines=$(wc -l < "$CFG8/web-safety.log" 2>/dev/null | tr -d ' ')
+[ "$lines" = "1" ] \
+  && ok "approve: URL newline cannot forge a second log line" \
+  || bad "approve: log forging via newline (lines=$lines, want 1)"
+rm -rf "$CFG8"
+
+# --- hooks.json: MCP matcher breadth (#8) ---
+HJSON="$REPO_ROOT/hooks/hooks.json"
+jq -e . "$HJSON" >/dev/null 2>&1 && ok "hooks.json is valid JSON" || bad "hooks.json invalid JSON"
+M8=$(jq -r '.hooks.PostToolUse[0].matcher' "$HJSON")
+for t in mcp__tavily__web_search mcp__firecrawl__firecrawl_scrape mcp__fetch2__fetch_url; do
+  printf '%s' "$t" | grep -qE "$M8" && ok "matcher covers generic MCP fetch tool: $t" || bad "matcher misses $t"
+done
+printf '%s' "mcp__db__run_query" | grep -qE "$M8" \
+  && bad "matcher over-broad: matched a non-web MCP tool" || ok "matcher excludes non-web MCP tool"
+
+# --- report: a '|' in a logged tool/host must not break the markdown tables (#12/3b) ---
+CFG9=$(mktemp -d)
+printf '[2026-05-01 10:00:00] [HIGH] tool=mcp__a|b__x url=https://ev|l.test/p patterns="y"\n' > "$CFG9/web-safety.log"
+rep9=$(WEB_SAFETY_CONFIG_DIR="$CFG9" "$REPORT" 2>&1)
+printf '%s' "$rep9" | grep -qE '^\| mcp__ab__x \| ' \
+  && ok "report: pipe in tool name stripped from table cell" || bad "report: pipe in tool name breaks table"
+printf '%s' "$rep9" | grep -qE '^\| evl\.test \| ' \
+  && ok "report: pipe in host stripped from table cell" || bad "report: pipe in host breaks table"
+rm -rf "$CFG9"
+
 # --- verify-context: bracket delimiter patterns must not be treated as regex ---
 # A genuine [INST] injection that merely shares a line with an unrelated quoted
 # "key": "value" must NOT be auto-cleared. The bug: the matched pattern [inst]

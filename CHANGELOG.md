@@ -2,6 +2,59 @@
 
 All notable changes to this project. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [7.4.0] — 2026-06-02
+
+Coverage, false-positive, and log-integrity fixes from the same full-codebase
+review (PR 2 of a staged series).
+
+### Security
+
+- **Audit-log → report injection closed (#12).** Attacker-influenced URLs are
+  control-char-stripped before being written to `web-safety.log` (a raw newline
+  would otherwise forge log lines that the report later trusts), and
+  `web-safety-report.sh` neutralizes backticks in logged content so a logged URL
+  can no longer close the Markdown code fence and inject markdown into the
+  "Most recent" section. Applies to both the pre-screen and scanner log writers.
+
+### Fixed
+
+- **Object-shaped `tool_response` was effectively unscanned (#9).** Real WebFetch
+  / MCP tools return `tool_response` as an object, not a flat string; `jq -r`
+  serialized it so JSON escaping could split injection patterns. The scanner now
+  flattens an object/array response's string leaves to newline-joined text before
+  scanning (string responses are unchanged).
+- **`approve.sh` false positives (#10):** a blank / comment-only
+  `url-blocklist.txt` no longer blocks **every** URL (BSD `grep -F -f` on an empty
+  pattern set matches all lines — now filtered to real entries), and a WebSearch
+  free-text `.query` is no longer run through the URL hard-blocks (a query merely
+  mentioning "localhost" or a ".tk" domain was being blocked; its results are
+  still scanned by the PostToolUse scanner).
+
+### Changed
+
+- **Broader MCP tool coverage (#8).** The hook matcher now also catches MCP tools
+  by keyword (`fetch` / `search` / `scrape` / `crawl` / `browse` / `read_url` /
+  `to_markdown` / `extract` / …) so a newly-added fetch/search MCP server is
+  scanned without enumerating its exact tool slugs. Non-web MCP tools (e.g.
+  `db__run_query`) are not matched.
+
+### Notes
+
+- Reviewed by a pre-commit security-auditor gate (no blocking findings). Two
+  MEDIUM refinements were folded in: the object-flatten uses a **space** join (not
+  newline) so a payload fragmented across sibling fields stays adjacent for the
+  line-oriented matcher; and the report's markdown tables now strip `|` from
+  tool/host cells (the fence fix alone left the tables open). Write-site URL log
+  sanitization also strips DEL (0x7f), not just C0.
+- Documented LOW residual: dropping the `.query` URL pre-screen means a
+  hypothetical fetch tool that delivers its target URL in `.query` (no standard
+  tool does) would skip SSRF pre-screening; its response is still scanned.
+- Exfil-chain hardening (#3 — gating web-fetch egress, the egress guard adopting
+  the shared `web-safety-lib.sh`) and egress false-positive tuning (#11) are
+  deferred to a focused follow-up PR; they carry the egress guard's larger
+  regression surface and warrant their own gate.
+- Suites: scanner 42, cmd 45, egress 50 — all green.
+
 ## [7.3.0] — 2026-06-02
 
 Security-critical hardening from a full-codebase review. This release closes the

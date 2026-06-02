@@ -4,7 +4,11 @@
 # Phase 2: If safe, approve with systemMessage injection
 
 INPUT=$(cat)
-URL=$(echo "$INPUT" | jq -r '.tool_input.url // .tool_input.URL // .tool_input.query // ""' 2>/dev/null)
+# Only treat an actual URL field as a URL. A WebSearch free-text `.query` must
+# NOT be run through the URL hard-blocks (a query that merely mentions
+# "localhost" or a ".tk" domain would otherwise be falsely blocked); its results
+# are still scanned by the PostToolUse scanner.
+URL=$(echo "$INPUT" | jq -r '.tool_input.url // .tool_input.URL // ""' 2>/dev/null)
 
 # Shared host-normalization + classification helpers (single source of truth
 # with the egress guard). Resolves next to this script in both plugin and
@@ -24,7 +28,11 @@ ALLOWLIST="$CONFIG_DIR/url-allowlist.txt"
 
 block_url() {
   mkdir -p "$CONFIG_DIR" 2>/dev/null
-  echo "[$(date '+%Y-%m-%d %H:%M:%S')] [PRE-BLOCK] url=$URL reason=$1" >> "$LOG"
+  # Strip control chars (incl. CR/LF) and truncate before logging: the URL is
+  # attacker-influenced, and a raw newline would forge extra log lines that
+  # web-safety-report.sh later trusts (log injection, #12).
+  local LOG_URL; LOG_URL=$(printf '%s' "$URL" | tr -d '\000-\037\177' | cut -c1-256)
+  echo "[$(date '+%Y-%m-%d %H:%M:%S')] [PRE-BLOCK] url=$LOG_URL reason=$1" >> "$LOG"
   # Show the offending URL as subtitle (truncated, AppleScript metacharacters stripped).
   SAFE_URL=$(printf '%s' "$URL" | cut -c1-120 | tr -d '"\\')
   osascript -e "display notification \"$1\" with title \"🛡️ URL Blocked\" subtitle \"${SAFE_URL}\" sound name \"Funk\"" >/dev/null 2>&1 &
@@ -91,7 +99,14 @@ if [ -n "$URL" ]; then
   # --- Soft blocks (heuristics — allowlist can override) ---
   if [ "$ALLOWLISTED" = "0" ]; then
     echo "$URL" | grep -qEi '\.(tk|ml|ga|cf|gq|zip|mov|top|buzz|surf|click|link)\b' && block_url "high-risk TLD"
-    [ -f "$BLOCKLIST" ] && echo "$URL" | grep -qiF -f "$BLOCKLIST" && block_url "domain in blocklist"
+    # Blocklist match, but ONLY against real (non-blank, non-comment) entries:
+    # `grep -F -f` with an empty/blank-only pattern file matches EVERY line on
+    # BSD grep, which would block all fetches. Filter first, then require a
+    # non-empty pattern set before matching.
+    if [ -s "$BLOCKLIST" ]; then
+      BL_PATTERNS=$(grep -vE '^[[:space:]]*(#|$)' "$BLOCKLIST" 2>/dev/null)
+      [ -n "$BL_PATTERNS" ] && printf '%s' "$URL" | grep -qiF -f <(printf '%s\n' "$BL_PATTERNS") && block_url "domain in blocklist"
+    fi
   fi
 fi
 
