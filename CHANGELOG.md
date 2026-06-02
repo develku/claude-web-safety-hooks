@@ -2,6 +2,90 @@
 
 All notable changes to this project. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [7.3.0] — 2026-06-02
+
+Security-critical hardening from a full-codebase review. This release closes the
+highest-severity findings — an SSRF pre-screen bypass, a fail-open on large /
+adversarial pages, a broken hex-entity normalization, and a verifier flaw that
+auto-cleared genuine `[INST]` injection — and hardens the test suite so a
+fail-open can no longer pass green. (Part 1 of a staged 3-PR review fix.)
+
+### Security
+
+- **SSRF pre-screen bypass closed** (`web-safety-approve.sh`). The "internal
+  network" hard block was bypassable by alternate encodings of an internal host:
+  decimal-integer IPs (`http://2130706433/` = 127.0.0.1), hex IPs
+  (`http://0x7f000001/`), userinfo tricks (`http://allowed.com@127.0.0.1/`), and
+  cloud-metadata hostnames (`metadata.google.internal`, any `*.internal`).
+  Classification now runs **after canonical host normalization** — scheme,
+  userinfo, and port stripped; integer/hex/octal IPv4 collapsed to dotted-quad —
+  so every encoding of an internal target resolves to the same string before the
+  block. New shared library `scripts/web-safety-lib.sh` is the single source of
+  truth for host parsing/classification, used by both the URL pre-screen and the
+  egress guard (previously divergent hand-rolled copies).
+- **Hex HTML-entity evasion closed** (`web-safety-scanner.sh`). The "decoded"
+  normalization view rewrote `&#x69;` to the literal text `\x69` and never
+  produced the byte, so hex-entity-obfuscated injection
+  (`&#x69;gnore previous instructions`) slipped past every grep view. Numeric
+  entities — decimal **and** hex, any digit count — are now decoded via perl
+  `chr`/`hex` (this also fixes the prior 2–3-digit-only / lookup-table limit on
+  decimal entities).
+- **Verifier no longer clears genuine `[INST]`/`[sys]` injection**
+  (`web-safety-verify-context.sh`). Matched delimiter patterns were interpolated
+  raw into `grep -E`, so bracket patterns became regex character classes and
+  over-matched unrelated text — auto-clearing real Llama/Mistral
+  instruction-delimiter injections as "structural false positives." Patterns are
+  now regex-escaped before interpolation.
+
+### Fixed
+
+- **Fail-open on large / adversarial pages** (`web-safety-scanner.sh`).
+  `tool_response` was unbounded; a large page (or adversarial padding) could push
+  the scan past the 10 s PostToolUse timeout, at which point Claude Code kills the
+  hook and the page reaches the model **unscanned**. The scanner now caps the
+  scanned content at `MAX_SCAN_BYTES` (32 KB; override with
+  `WEB_SAFETY_MAX_SCAN_BYTES`) and emits a LOW note when it truncates, so the
+  unscanned tail is never silently trusted. The E8 reassembly indicator check is
+  bounded to a 4 KB prefix (it only decides whether to store a ≤1.5 KB excerpt),
+  and its greps drop a redundant `-i` (inputs and pattern files are already
+  lowercased) — removing the dominant cost on adversarial input.
+
+### Security gate
+
+- This release was reviewed before commit by a cross-model gate (Codex +
+  local security-auditor). It caught — and this release also fixes — a set of
+  **residual SSRF bypasses** in the first cut of the normalizer: IPv4-mapped
+  IPv6 (`[::ffff:127.0.0.1]`, `[::ffff:169.254.169.254]`), leading-whitespace /
+  leading-newline / embedded-control-char URLs, backslash authority desync
+  (`http://127.0.0.1\@allowed.com/`), single/double/triple percent-encoded hosts,
+  octal-whole-integer hosts, and empty-authority (`http:///127.0.0.1/`). Each now
+  has a regression test.
+
+### Tests
+
+- The harness no longer maps a scanner crash/non-zero exit to `clean` — a crash
+  on a `legit-*` payload now fails loudly, so a fail-open regression is visible.
+- Added an **enforcement-contract** assertion: a HIGH detection must emit
+  `continue:false` + `toolResult` + `stopReason`, not merely a `systemMessage`.
+- Added a production-size **perf regression test**, a **tail-injection** test
+  (injection past the head cap must still be caught), an entity-overflow test,
+  and SSRF / hex-entity / `[INST]`-verifier regression tests, plus an
+  empty-array `set -u` guard.
+
+### Known limitations (documented, by design)
+
+- **Oversized-page middle gap.** Content over `MAX_SCAN_BYTES` is scanned as a
+  head + tail slice; injection placed *only* in the omitted middle of such a page
+  is detected as a LOW "content too large" note rather than blocked. This is the
+  bounded-scan tradeoff that prevents the timeout-induced fail-open — the guard
+  is defense-in-depth, not a sandbox. Raising `WEB_SAFETY_MAX_SCAN_BYTES` shrinks
+  the gap at the cost of per-fetch latency.
+- **`host_is_internal` + hex-grouped IPv4-mapped IPv6.** The internal-network
+  classifier covers hex-grouped loopback (`::ffff:7f..`) and AWS metadata
+  (`::ffff:a9fe`) but not hex-grouped private ranges; consumers must pair it with
+  `host_is_bare_ip` (as the URL pre-screen does). The egress guard does not yet
+  use the shared lib — that adoption (a later PR) must honor this contract.
+
 ## [7.2.0] — 2026-06-01
 
 macOS notifications now show *what* triggered them. Previously every alert carried generic text ("Prompt injection detected! Content blocked.") and the cause lived only in the terminal `stopReason` and `web-safety.log` — and an osascript notification can't be clicked to reveal more (its owning app is just Script Editor). The cause is now in the notification itself, no click required.

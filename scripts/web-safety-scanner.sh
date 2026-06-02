@@ -92,6 +92,14 @@ SESSION_STATE="/tmp/web-safety-session-${SESSION_ID}-state"
 SESSION_FRAGMENTS="/tmp/web-safety-session-${SESSION_ID}-fragments"
 SESSION_WINDOW=300  # 5-minute sliding window
 
+# E8 indicator checks (does this fetch look like part of a split payload?) only
+# need to inspect a prefix: the stored reassembly excerpt is itself capped at
+# E8_EXCERPT_SIZE (1500B), so scanning more for the *decision* is wasted work.
+# Bounding it also defuses a DoS — `grep -Ff` against the large affix set over a
+# long no-match line is BSD grep's pathological case and was the dominant cost
+# on adversarial padding (finding #1). 4KB > the excerpt, so behavior is intact.
+E8_INDICATOR_SCAN_BYTES=4096
+
 # Tighten perms on /tmp state files so other users can't read scanned content.
 umask 0077
 
@@ -150,6 +158,31 @@ if [ -z "$TOOL_OUTPUT" ]; then
   exit 0
 fi
 
+# Bound the scanned size (finding #1 — fail-open guard). An unbounded
+# TOOL_OUTPUT drives every downstream pass (8 normalization views, perl
+# regexes, base64 decode, the E8 pipeline); a large page could blow the 10s
+# PostToolUse timeout, at which point Claude Code kills the hook and the page
+# reaches the model UNSCANNED. Scan a bounded HEAD + TAIL slice (injection is
+# typically near the start or end of poisoned content) and surface a LOW note
+# (below) so the unscanned middle is never silently trusted. Total scanned bytes
+# stay at MAX_SCAN_BYTES so the time budget is unchanged.
+MAX_SCAN_BYTES="${WEB_SAFETY_MAX_SCAN_BYTES:-32768}"    # 32 KB total — keeps even
+                                                        # an adversarial continuous
+                                                        # page under the 10s hook
+                                                        # budget (BSD grep -Ff is
+                                                        # slow on long lines)
+TOOL_OUTPUT_TRUNCATED=0
+if [ "${#TOOL_OUTPUT}" -gt "$MAX_SCAN_BYTES" ]; then
+  _ws_head=$(( MAX_SCAN_BYTES * 3 / 4 ))   # first 3/4
+  _ws_tail=$(( MAX_SCAN_BYTES - _ws_head )) # last 1/4 — catches end-of-page injection
+  TOOL_OUTPUT=$(
+    printf '%s' "$TOOL_OUTPUT" | head -c "$_ws_head"
+    printf '\n[web-safety: middle of oversized content omitted]\n'
+    printf '%s' "$TOOL_OUTPUT" | tail -c "$_ws_tail"
+  )
+  TOOL_OUTPUT_TRUNCATED=1
+fi
+
 LOWER_OUTPUT=$(echo "$TOOL_OUTPUT" | tr '[:upper:]' '[:lower:]')
 
 # =============================================================================
@@ -181,12 +214,17 @@ generate_views() {
     perl -pe 's{(?<![a-z])([a-z](?: [a-z]){3,})(?![a-z])}{(my $m=$1)=~s/ //g; $m}ge' | \
     tr -s '[:space:]' ' ' > "$target_dir/collapsed.txt"
 
-  # View 2: HTML entity decoded — catches &#105;gnore, &lt;system&gt;, etc.
+  # View 2: HTML entity decoded — numeric entities decoded via perl chr/hex
+  # (handles BOTH decimal &#105; and hex &#x69;, any digit count); named
+  # entities via sed. The previous hex branch rewrote &#x69; to the literal
+  # text "\x69" and never emitted the byte, so hex-entity-obfuscated injection
+  # (e.g. &#x69;gnore previous instructions) slipped past every grep view.
+  # tr -d '\000' drops any &#0;-injected NULs that would make grep treat the
+  # view as binary.
   printf '%s' "$input" | \
-    sed 's/&#x\([0-9a-f]\{2\}\);/\\x\1/g' | \
-    sed 's/&#\([0-9]\{2,3\}\);/ENTITY_\1/g' | \
-    sed 's/&lt;/</g; s/&gt;/>/g; s/&amp;/\&/g; s/&quot;/"/g; s/&#39;/'"'"'/g' | \
-    sed "s/ENTITY_105/i/g; s/ENTITY_103/g/g; s/ENTITY_110/n/g; s/ENTITY_111/o/g; s/ENTITY_114/r/g; s/ENTITY_101/e/g; s/ENTITY_115/s/g; s/ENTITY_116/t/g; s/ENTITY_121/y/g; s/ENTITY_112/p/g; s/ENTITY_109/m/g; s/ENTITY_100/d/g; s/ENTITY_97/a/g; s/ENTITY_98/b/g; s/ENTITY_99/c/g; s/ENTITY_102/f/g; s/ENTITY_104/h/g; s/ENTITY_106/j/g; s/ENTITY_107/k/g; s/ENTITY_108/l/g; s/ENTITY_113/q/g; s/ENTITY_117/u/g; s/ENTITY_118/v/g; s/ENTITY_119/w/g; s/ENTITY_120/x/g; s/ENTITY_122/z/g" \
+    perl -CSD -pe 's/&#x([0-9a-fA-F]+);/my $c=hex($1); ($c<=0x10FFFF)?chr($c):"&#x$1;"/ge; s/&#([0-9]+);/my $c=$1+0; ($c<=0x10FFFF)?chr($c):"&#$1;"/ge' 2>/dev/null | \
+    sed 's/&lt;/</g; s/&gt;/>/g; s/&amp;/\&/g; s/&quot;/"/g' | \
+    tr -d '\000' \
     > "$target_dir/decoded.txt"
 
   # View 3: Punctuation/separator stripped — catches "i.g.n.o.r.e", "i-g-n-o-r-e", "i_g_n_o_r_e"
@@ -227,6 +265,14 @@ echo "$LOWER_OUTPUT" | generate_views "$TMP_DIR"
 FOUND_HIGH=()
 FOUND_MEDIUM=()
 FOUND_LOW=()
+
+# Truncation note (finding #1): make the unscanned tail visible to the model
+# rather than silently dropping it. LOW so it informs without forcing a pause.
+# Added here (before the TOTAL==0 early-exit) so a large-but-clean page still
+# emits the note instead of exiting silently.
+if [ "$TOOL_OUTPUT_TRUNCATED" = "1" ]; then
+  FOUND_LOW+=("content exceeded the ${MAX_SCAN_BYTES}-byte scan limit — only its start and end were scanned for injection; the middle was not")
+fi
 
 # =============================================================================
 # HIGH SEVERITY PATTERNS
@@ -1226,11 +1272,15 @@ if [ "$TOTAL" -eq 0 ] && [ "$E8_ACTIVE" = "false" ]; then
   # normalized view (already produced by generate_views earlier) so Cyrillic/
   # Greek/fullwidth letter splits at fragment boundaries don't slip past the
   # storage decision. Per v6.1+ stress test reassembly-confusable-bridge.
-  if printf '%s' "$LOWER_OUTPUT" | grep -qiE -- "$E8_ORDERING_REGEX" \
-     || printf '%s' "$LOWER_OUTPUT" | grep -qiFf "$SUSPICIOUS_TOKENS_FILE" 2>/dev/null \
-     || printf '%s' "$LOWER_OUTPUT" | grep -qiFf "$SUSPICIOUS_AFFIX_FILE" 2>/dev/null \
-     || ([ -f "$TMP_DIR/confusable.txt" ] && grep -qiFf "$SUSPICIOUS_TOKENS_FILE" "$TMP_DIR/confusable.txt" 2>/dev/null) \
-     || ([ -f "$TMP_DIR/confusable.txt" ] && grep -qiFf "$SUSPICIOUS_AFFIX_FILE" "$TMP_DIR/confusable.txt" 2>/dev/null); then
+  # Bound the indicator scan (see E8_INDICATOR_SCAN_BYTES) — defuses the
+  # grep -Ff-over-long-line DoS while still seeing everything the excerpt stores.
+  E8_IND_INPUT=$(printf '%s' "$LOWER_OUTPUT" | head -c "$E8_INDICATOR_SCAN_BYTES")
+  E8_IND_CONF=$([ -f "$TMP_DIR/confusable.txt" ] && head -c "$E8_INDICATOR_SCAN_BYTES" "$TMP_DIR/confusable.txt")
+  if printf '%s' "$E8_IND_INPUT" | grep -qE -- "$E8_ORDERING_REGEX" \
+     || printf '%s' "$E8_IND_INPUT" | grep -qFf "$SUSPICIOUS_TOKENS_FILE" 2>/dev/null \
+     || printf '%s' "$E8_IND_INPUT" | grep -qFf "$SUSPICIOUS_AFFIX_FILE" 2>/dev/null \
+     || printf '%s' "$E8_IND_CONF" | grep -qFf "$SUSPICIOUS_TOKENS_FILE" 2>/dev/null \
+     || printf '%s' "$E8_IND_CONF" | grep -qFf "$SUSPICIOUS_AFFIX_FILE" 2>/dev/null; then
     E8_ACTIVE=true
   fi
 fi
@@ -1582,21 +1632,27 @@ e8_unlock() { rmdir "${SESSION_FRAGMENTS}.lock" 2>/dev/null; }
 # Also consults the confusable-normalized per-fetch view so Cyrillic/Greek/
 # fullwidth letter splits don't slip past the storage gate.
 e8_has_indicator() {
-  local content="$1"
-  if printf '%s' "$content" | grep -qiE -- "$E8_ORDERING_REGEX"; then
+  # Bound the scan (see E8_INDICATOR_SCAN_BYTES): the decision only needs a
+  # prefix, and an unbounded grep -Ff over a long no-match line is the DoS that
+  # finding #1 flagged.
+  local content
+  content=$(printf '%s' "$1" | head -c "$E8_INDICATOR_SCAN_BYTES")
+  if printf '%s' "$content" | grep -qE -- "$E8_ORDERING_REGEX"; then
     return 0
   fi
-  if printf '%s' "$content" | grep -qiFf "$SUSPICIOUS_TOKENS_FILE" 2>/dev/null; then
+  if printf '%s' "$content" | grep -qFf "$SUSPICIOUS_TOKENS_FILE" 2>/dev/null; then
     return 0
   fi
-  if printf '%s' "$content" | grep -qiFf "$SUSPICIOUS_AFFIX_FILE" 2>/dev/null; then
+  if printf '%s' "$content" | grep -qFf "$SUSPICIOUS_AFFIX_FILE" 2>/dev/null; then
     return 0
   fi
   if [ -f "$TMP_DIR/confusable.txt" ]; then
-    if grep -qiFf "$SUSPICIOUS_TOKENS_FILE" "$TMP_DIR/confusable.txt" 2>/dev/null; then
+    local conf
+    conf=$(head -c "$E8_INDICATOR_SCAN_BYTES" "$TMP_DIR/confusable.txt")
+    if printf '%s' "$conf" | grep -qFf "$SUSPICIOUS_TOKENS_FILE" 2>/dev/null; then
       return 0
     fi
-    if grep -qiFf "$SUSPICIOUS_AFFIX_FILE" "$TMP_DIR/confusable.txt" 2>/dev/null; then
+    if printf '%s' "$conf" | grep -qFf "$SUSPICIOUS_AFFIX_FILE" 2>/dev/null; then
       return 0
     fi
   fi
@@ -1787,6 +1843,7 @@ if [ -f "$SESSION_FRAGMENTS" ]; then
     fi
   fi
 fi
+
 
 # --- HIGH SEVERITY: Stop or Critical Warning ---
 if [ ${#UNIQUE_HIGH[@]} -gt 0 ]; then
