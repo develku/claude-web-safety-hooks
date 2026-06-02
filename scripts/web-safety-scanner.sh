@@ -1005,26 +1005,25 @@ LOW_MARKDOWN_IMAGES=(
 # TMP_DIR + per-fetch views were already created above by generate_views.
 # =============================================================================
 
+# SINGLE SOURCE of the MEDIUM pattern set (#14). Every consumer — the med.pat
+# grep build, the lowercase→original casing maps, the E8 reassembly trigger
+# lexicon, and the reassembly casing map — references MED_ALL so the list cannot
+# drift between sites (it previously did: grep used 14 arrays, E8 only 6, so
+# reassembly attacks built from the other 8 categories never opened the window).
+MED_ALL=(
+  "${MED_INSTRUCTION_OVERRIDE[@]}" "${MED_ROLE_MANIPULATION[@]}" "${MED_GENERIC_DELIMITERS[@]}"
+  "${MED_PROMPT_EXTRACTION[@]}" "${MED_JAILBREAK[@]}" "${MED_AUTHORITY[@]}"
+  "${MED_GENERIC_EXFIL[@]}" "${MED_TOOL_JSON[@]}" "${MED_ENCODING[@]}"
+  "${MED_MULTILINGUAL[@]}" "${MED_HTML_COMMENTS[@]}" "${MED_DELIMITER_BREAKING[@]}"
+  "${MED_PAYLOAD_SPLITTING[@]}" "${MED_COGNITIVE[@]}"
+)
+
 # Build pattern files (lowercase, one per severity)
 for p in "${HIGH_LLM_TOKENS[@]}" "${HIGH_TOOL_FAKING[@]}" "${HIGH_EXFIL[@]}"; do
   echo "$p" | tr '[:upper:]' '[:lower:]'
 done > "$TMP_DIR/high.pat"
 
-for p in \
-  "${MED_INSTRUCTION_OVERRIDE[@]}" \
-  "${MED_ROLE_MANIPULATION[@]}" \
-  "${MED_GENERIC_DELIMITERS[@]}" \
-  "${MED_PROMPT_EXTRACTION[@]}" \
-  "${MED_JAILBREAK[@]}" \
-  "${MED_AUTHORITY[@]}" \
-  "${MED_GENERIC_EXFIL[@]}" \
-  "${MED_TOOL_JSON[@]}" \
-  "${MED_ENCODING[@]}" \
-  "${MED_MULTILINGUAL[@]}" \
-  "${MED_HTML_COMMENTS[@]}" \
-  "${MED_DELIMITER_BREAKING[@]}" \
-  "${MED_PAYLOAD_SPLITTING[@]}" \
-  "${MED_COGNITIVE[@]}"; do
+for p in "${MED_ALL[@]}"; do
   echo "$p" | tr '[:upper:]' '[:lower:]'
 done > "$TMP_DIR/med.pat"
 
@@ -1077,21 +1076,7 @@ done <<< "$HIGH_MATCHES"
 # MEDIUM
 MED_MATCHES=$(run_batch_grep "MEDIUM" "$TMP_DIR/med.pat")
 
-ALL_MED_PATTERNS=( \
-  "${MED_INSTRUCTION_OVERRIDE[@]}" \
-  "${MED_ROLE_MANIPULATION[@]}" \
-  "${MED_GENERIC_DELIMITERS[@]}" \
-  "${MED_PROMPT_EXTRACTION[@]}" \
-  "${MED_JAILBREAK[@]}" \
-  "${MED_AUTHORITY[@]}" \
-  "${MED_GENERIC_EXFIL[@]}" \
-  "${MED_TOOL_JSON[@]}" \
-  "${MED_ENCODING[@]}" \
-  "${MED_MULTILINGUAL[@]}" \
-  "${MED_HTML_COMMENTS[@]}" \
-  "${MED_DELIMITER_BREAKING[@]}" \
-  "${MED_PAYLOAD_SPLITTING[@]}" \
-  "${MED_COGNITIVE[@]}")
+ALL_MED_PATTERNS=( "${MED_ALL[@]}" )
 while IFS= read -r match; do
   [ -z "$match" ] && continue
   for p in "${ALL_MED_PATTERNS[@]}"; do
@@ -1171,15 +1156,28 @@ fi
 # =============================================================================
 # Base64 encoded content check (HIGH)
 # =============================================================================
-if echo "$TOOL_OUTPUT" | grep -qE '[A-Za-z0-9+/]{50,}={0,2}' 2>/dev/null; then
-  B64_MATCHES=$(echo "$TOOL_OUTPUT" | grep -oE '[A-Za-z0-9+/]{50,}={0,2}' | head -5)
-  for match in $B64_MATCHES; do
-    DECODED=$(echo "$match" | base64 -d 2>/dev/null | tr '[:upper:]' '[:lower:]')
-    if echo "$DECODED" | grep -qE "(ignore|instruction|system|prompt|override|bypass|jailbreak)" 2>/dev/null; then
+# #5: catch base64-wrapped injection across four prior gaps —
+#   (a) lower the run threshold 50→16 chars (~12 plaintext bytes) so SHORT
+#       override phrases are seen;
+#   (b) strip line-wrapping (\r\n) first so wrapped base64 is one run;
+#   (c) decode up to 50 runs (was 5) so padding the page with benign blobs
+#       can't bury the payload (bounded by the input scan cap);
+#   (d) scan the DECODED text against the FULL high.pat + med.pat set (not a
+#       7-word English list), so multilingual / role-manipulation payloads match.
+B64_SRC=$(printf '%s' "$TOOL_OUTPUT" | tr -d '\r\n')
+if printf '%s' "$B64_SRC" | grep -qE '[A-Za-z0-9+/]{16,}={0,2}' 2>/dev/null; then
+  B64_MATCHES=$(printf '%s' "$B64_SRC" | grep -oE '[A-Za-z0-9+/]{16,}={0,2}' | head -50)
+  while IFS= read -r match; do
+    [ -z "$match" ] && continue
+    DECODED=$(printf '%s' "$match" | base64 -d 2>/dev/null | tr '[:upper:]' '[:lower:]')
+    [ -z "$DECODED" ] && continue
+    if printf '%s' "$DECODED" | grep -qFf "$TMP_DIR/high.pat" 2>/dev/null \
+       || printf '%s' "$DECODED" | grep -qFf "$TMP_DIR/med.pat" 2>/dev/null \
+       || printf '%s' "$DECODED" | grep -qE "(ignore|instruction|system|prompt|override|bypass|jailbreak)" 2>/dev/null; then
       FOUND_HIGH+=("suspicious base64-encoded content")
       break
     fi
-  done
+  done <<< "$B64_MATCHES"
 fi
 
 # Known base64 prefixes of common attack strings (HIGH)
@@ -1244,12 +1242,7 @@ if [ "$TOTAL" -eq 0 ] && [ "$E8_ACTIVE" = "false" ]; then
 
   # Whole tokens (length >= 3, space-tokenized)
   printf '%s\n' \
-    "${MED_INSTRUCTION_OVERRIDE[@]}" \
-    "${MED_ROLE_MANIPULATION[@]}" \
-    "${MED_GENERIC_DELIMITERS[@]}" \
-    "${MED_PROMPT_EXTRACTION[@]}" \
-    "${MED_JAILBREAK[@]}" \
-    "${MED_AUTHORITY[@]}" \
+    "${MED_ALL[@]}" \
     | tr ' ' '\n' \
     | tr '[:upper:]' '[:lower:]' \
     | sed 's/[^a-z0-9]//g' \
@@ -1261,12 +1254,8 @@ if [ "$TOTAL" -eq 0 ] && [ "$E8_ACTIVE" = "false" ]; then
   # 3-char minimum avoids the FP storm that 2-char would cause (common bigrams
   # like "th", "he", "in" appear in every English document).
   printf '%s\n' \
-    "${MED_INSTRUCTION_OVERRIDE[@]}" \
-    "${MED_ROLE_MANIPULATION[@]}" \
-    "${MED_GENERIC_DELIMITERS[@]}" \
-    "${MED_PROMPT_EXTRACTION[@]}" \
-    "${MED_JAILBREAK[@]}" \
-    "${MED_AUTHORITY[@]}" \
+    "${MED_ALL[@]}" \
+    | tr ' ' '\n' \
     | tr '[:upper:]' '[:lower:]' \
     | sed 's/[^a-z0-9]//g' \
     | awk '
@@ -1586,12 +1575,7 @@ SUSPICIOUS_TOKENS_FILE="$TMP_DIR/e8-suspicious.txt"
 SUSPICIOUS_AFFIX_FILE="$TMP_DIR/e8-affixes.txt"
 if [ ! -s "$SUSPICIOUS_TOKENS_FILE" ]; then
   printf '%s\n' \
-    "${MED_INSTRUCTION_OVERRIDE[@]}" \
-    "${MED_ROLE_MANIPULATION[@]}" \
-    "${MED_GENERIC_DELIMITERS[@]}" \
-    "${MED_PROMPT_EXTRACTION[@]}" \
-    "${MED_JAILBREAK[@]}" \
-    "${MED_AUTHORITY[@]}" \
+    "${MED_ALL[@]}" \
     | tr ' ' '\n' \
     | tr '[:upper:]' '[:lower:]' \
     | sed 's/[^a-z0-9]//g' \
@@ -1602,12 +1586,8 @@ if [ ! -s "$SUSPICIOUS_AFFIX_FILE" ]; then
   # v6.1: 3+ char substrings of MED patterns (spaces stripped). Catches
   # affix-only fragments like "obe" (substring of "obey" inside "do not obey").
   printf '%s\n' \
-    "${MED_INSTRUCTION_OVERRIDE[@]}" \
-    "${MED_ROLE_MANIPULATION[@]}" \
-    "${MED_GENERIC_DELIMITERS[@]}" \
-    "${MED_PROMPT_EXTRACTION[@]}" \
-    "${MED_JAILBREAK[@]}" \
-    "${MED_AUTHORITY[@]}" \
+    "${MED_ALL[@]}" \
+    | tr ' ' '\n' \
     | tr '[:upper:]' '[:lower:]' \
     | sed 's/[^a-z0-9]//g' \
     | awk '
@@ -1679,6 +1659,12 @@ if e8_has_indicator "$LOWER_OUTPUT"; then
   e8_should_store=true
 elif [ "$SESSION_HITS" -ge 1 ]; then
   e8_should_store=true
+elif [ -f "$SESSION_FRAGMENTS" ]; then
+  # Reassembly window already open (a prior fetch stored a fragment): capture
+  # THIS fetch too even if it carries no standalone indicator (#7b). Otherwise a
+  # benign-looking completing half — the second piece of a split payload — is
+  # never stored, so the buffered halves never reach the >=2 needed to reassemble.
+  e8_should_store=true
 fi
 
 # Store excerpt of current fetch if eligible.
@@ -1688,7 +1674,19 @@ if [ "$e8_should_store" = "true" ]; then
   # etc.) so cross-fragment boundary computations and concat grep work
   # correctly when attackers split at letters spelled with confusable
   # characters. Per v6.1+ stress test reassembly-confusable-bridge.
-  E8_EXCERPT=$(printf '%s' "$LOWER_OUTPUT" | head -c "$E8_EXCERPT_SIZE" | \
+  # Excerpt = HEAD + TAIL of the lowered content (#7a). Head-only let an attacker
+  # prepend > E8_EXCERPT_SIZE bytes of benign filler to each fragment so the
+  # malicious tail was never stored; sampling the end too captures a payload
+  # placed late in a long fragment. Content that already fits is taken whole
+  # (no head/tail duplication).
+  if [ "${#LOWER_OUTPUT}" -gt "$E8_EXCERPT_SIZE" ]; then
+    E8_SLICE=$( { printf '%s' "$LOWER_OUTPUT" | head -c $(( E8_EXCERPT_SIZE * 2 / 3 ))
+                  printf '\n'
+                  printf '%s' "$LOWER_OUTPUT" | tail -c $(( E8_EXCERPT_SIZE / 3 )); } )
+  else
+    E8_SLICE="$LOWER_OUTPUT"
+  fi
+  E8_EXCERPT=$(printf '%s' "$E8_SLICE" | \
     sed 's/а/a/g; s/е/e/g; s/о/o/g; s/р/p/g; s/с/c/g; s/у/y/g; s/х/x/g; s/і/i/g; s/ј/j/g; s/ѕ/s/g; s/ԁ/d/g; s/ɡ/g/g; s/ɑ/a/g; s/ε/e/g; s/ο/o/g; s/ν/v/g; s/ι/i/g; s/κ/k/g; s/τ/t/g; s/η/n/g' | \
     sed 's/ａ/a/g; s/ｂ/b/g; s/ｃ/c/g; s/ｄ/d/g; s/ｅ/e/g; s/ｆ/f/g; s/ｇ/g/g; s/ｈ/h/g; s/ｉ/i/g; s/ｊ/j/g; s/ｋ/k/g; s/ｌ/l/g; s/ｍ/m/g; s/ｎ/n/g; s/ｏ/o/g; s/ｐ/p/g; s/ｑ/q/g; s/ｒ/r/g; s/ｓ/s/g; s/ｔ/t/g; s/ｕ/u/g; s/ｖ/v/g; s/ｗ/w/g; s/ｘ/x/g; s/ｙ/y/g; s/ｚ/z/g')
   # Plain base64 (single-line, no padding stripped) — TSV-safe since
@@ -1813,31 +1811,64 @@ if [ -f "$SESSION_FRAGMENTS" ] && [ "$e8_should_store" = "true" ]; then
 
       E8_CROSS_MATCHES=$(printf '%s' "$E8_CROSS_MATCHES" | sort -u | grep -v '^$' || true)
 
-      if [ -n "$E8_CROSS_MATCHES" ]; then
+      # Suppress reassembled patterns that already fired earlier in this session
+      # (#7b follow-up). Without this, the same buffered halves re-satisfy the
+      # cross-fragment match on EVERY subsequent fetch inside the 300s window,
+      # re-emitting the HIGH stop + audit line — including on benign fetches that
+      # merely re-open the window. De-duping against a fired-set (rather than
+      # evicting all fragments) preserves the legitimate case where a *new*
+      # pattern completes on a later fetch of the same multi-stage payload.
+      # The fired-set check (grep) and append must share ONE lock, else two
+      # concurrent same-session scanners can both read a pattern as "new" and both
+      # fire it (TOCTOU dup). We acquire the lock BEFORE the filter loop and hold
+      # it through the append. On lock failure we still filter (best-effort read,
+      # no record) — degrading toward re-firing the same pattern on a later fetch
+      # (over-alert) rather than ever silently dropping a detection.
+      E8_FIRED_FILE="${SESSION_FRAGMENTS}.fired"
+      E8_NEW_MATCHES=""
+      E8_FIRED_LOCKED=false
+      e8_lock && E8_FIRED_LOCKED=true
+      while IFS= read -r match; do
+        [ -z "$match" ] && continue
+        if [ -f "$E8_FIRED_FILE" ] && grep -qxF -- "$match" "$E8_FIRED_FILE" 2>/dev/null; then
+          continue
+        fi
+        E8_NEW_MATCHES="${E8_NEW_MATCHES}${match}"$'\n'
+      done <<< "$E8_CROSS_MATCHES"
+      E8_NEW_MATCHES=$(printf '%s' "$E8_NEW_MATCHES" | sort -u | grep -v '^$' || true)
+      if [ "$E8_FIRED_LOCKED" = "true" ]; then
+        [ -n "$E8_NEW_MATCHES" ] && {
+          printf '%s\n' "$E8_NEW_MATCHES" >> "$E8_FIRED_FILE"
+          chmod 0600 "$E8_FIRED_FILE" 2>/dev/null
+        }
+        e8_unlock
+      fi
+
+      if [ -n "$E8_NEW_MATCHES" ]; then
         E8_REASSEMBLED=true
-        E8_REASSEMBLED_PATTERNS="$E8_CROSS_MATCHES"
+        E8_REASSEMBLED_PATTERNS="$E8_NEW_MATCHES"
         E8_REASSEMBLED_PARTICIPATING=$(printf '%s\n' "$E8_FRAG_ROWS" | awk -F'\t' '{print $1"/"$3"/"$4}' | tr '\n' ',' | sed 's/,$//')
 
         # Promote each reassembled pattern into UNIQUE_HIGH so existing
         # HIGH branch handles output formatting + sanitization.
         while IFS= read -r match; do
           [ -z "$match" ] && continue
-          # Map lowercase match back to original casing via MED arrays
-          for p in "${MED_INSTRUCTION_OVERRIDE[@]}" "${MED_ROLE_MANIPULATION[@]}" \
-                   "${MED_GENERIC_DELIMITERS[@]}" "${MED_PROMPT_EXTRACTION[@]}" \
-                   "${MED_JAILBREAK[@]}" "${MED_AUTHORITY[@]}"; do
+          # Map lowercase match back to original casing via the full MED set
+          # (#7c — must cover all 14 arrays, else a reassembled pattern from one
+          # of the other categories wouldn't promote to HIGH).
+          for p in "${MED_ALL[@]}"; do
             if [ "$(printf '%s' "$p" | tr '[:upper:]' '[:lower:]')" = "$match" ]; then
               UNIQUE_HIGH+=("[REASSEMBLED] $p")
               break
             fi
           done
-        done <<< "$E8_CROSS_MATCHES"
+        done <<< "$E8_NEW_MATCHES"
 
         # Audit log
         printf '[%s] [REASSEMBLED] participating=%s patterns=%s\n' \
           "$(date '+%Y-%m-%d %H:%M:%S')" \
           "$E8_REASSEMBLED_PARTICIPATING" \
-          "$(printf '%s' "$E8_CROSS_MATCHES" | tr '\n' ',' | sed 's/,$//')" \
+          "$(printf '%s' "$E8_NEW_MATCHES" | tr '\n' ',' | sed 's/,$//')" \
           >> "$LOG_FILE"
       fi
     fi

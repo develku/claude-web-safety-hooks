@@ -2,6 +2,76 @@
 
 All notable changes to this project. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [7.6.0] — 2026-06-02
+
+Detection-recall hardening (PR 4 of the staged review): the two remaining HIGH
+false-negative findings (#5 base64, #7 cross-call reassembly) plus the targeted
+lexicon unification (#14 / #7c). These close the gaps where a determined attacker
+could smuggle an injection past the scanner.
+
+### Security (closed false negatives)
+
+- **Base64 detection strengthened (#5).** The encoded-content check previously
+  needed a single unbroken run of ≥50 base64 chars and decode-matched only against
+  a 7-word English keyword list. It now: strips CR/LF before scanning (defeating
+  line-wrapped blobs), lowers the run threshold to ≥16 chars, decodes up to 50
+  candidate runs (was 5), and greps each decode against the **real** `high.pat` +
+  `med.pat` pattern files (plus the keyword fallback) — so a base64-wrapped payload
+  in any of the lexicon's languages is caught, not just English.
+- **Cross-call reassembly evasions closed (#7).** Layer 8 (E8) buffers fetch
+  excerpts and detects an injection split across several fetches. Three gaps closed:
+  - **(#7a) excerpt now samples head *and* tail.** Head-only let an attacker prepend
+    > `E8_EXCERPT_SIZE` bytes of benign filler to each fragment so the malicious tail
+    was never buffered; the excerpt is now head ⅔ + tail ⅓.
+  - **(#7b) the reassembly window captures completing fragments.** Once a fragment is
+    buffered, a later fetch is now also buffered even if it carries no standalone
+    indicator — otherwise the benign-looking *second half* of a split payload was
+    never stored, so the halves never reached the ≥2 needed to reassemble.
+  - **(#7c) the reassembly lexicon now covers all 14 MED categories.** It previously
+    used a 6-array subset, so a payload reassembled from any of the other 8 pattern
+    categories never opened the window.
+
+### Changed (architecture, #14)
+
+- **Single-source MED lexicon (`MED_ALL`).** The 14 medium-severity pattern arrays
+  were expanded into the grep build, the casing maps, the E8 token/affix index, and
+  the reassembly promotion map at **seven** separate sites — a drift hazard where a
+  new pattern added in one place silently missed the others. They are now composed
+  once into `MED_ALL` and every consumer reads that array.
+
+### Security gate (two passes — found and fixed real regressions)
+
+Reviewed pre-commit by the security gate. The first pass flagged that broadening
+the reassembly lexicon (#7c) **amplified a latent false-positive**: the affix index
+was built from space-*stripped* whole phrases, generating cross-word trigrams
+(`epr`, `usi`, …) that matched ordinary prose and opened the E8 window on benign
+content — which #7b then made re-run the reassembly pipeline (and potentially
+re-fire) on every subsequent fetch. Both were fixed and re-verified CLOSED:
+
+- **Per-word affix index.** Both affix-build pipelines now tokenize on spaces first,
+  so affixes are substrings of individual MED *words* (the `obe`-from-`obey` design
+  intent), not cross-word artifacts of whole phrases. The prose FP source is gone.
+- **Fired-set de-dup (not eviction).** A reassembled pattern that already fired in a
+  session is recorded in a per-session fired-set and suppressed on later fetches, so
+  the same buffered halves can't re-emit the HIGH stop every fetch — while a
+  *genuinely new* pattern completing on a later fetch still fires. Check + append
+  share one lock (atomic), and lock failure degrades toward re-alerting, never
+  toward silently dropping a detection.
+
+### Known limitations (documented, by design)
+
+- The E8 window still opens on benign content that contains a real injection-word
+  substring (`system`, `ignore`, …). This is a cheap, consequence-free gate: it only
+  triggers buffering + a bounded reassembly pass — it cannot itself raise a verdict,
+  and the fired-set caps any reassembly to one fire.
+- Base64 detection still does not cover the URL-safe alphabet (`-`/`_`) or
+  space-separated (vs CR/LF-wrapped) runs — a known, narrower residual.
+
+### Notes
+
+- Suites: scanner 46, cmd 45, egress 71 — all green (256 KB benign page scans in
+  ~3.4 s, well under the 8 s budget).
+
 ## [7.5.0] — 2026-06-02
 
 Exfil-chain hardening (PR 3 of the staged review). Layer 6 (the inject→exfil
