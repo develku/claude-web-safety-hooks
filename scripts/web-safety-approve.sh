@@ -6,6 +6,13 @@
 INPUT=$(cat)
 URL=$(echo "$INPUT" | jq -r '.tool_input.url // .tool_input.URL // .tool_input.query // ""' 2>/dev/null)
 
+# Shared host-normalization + classification helpers (single source of truth
+# with the egress guard). Resolves next to this script in both plugin and
+# standalone/test invocations, mirroring the scanner's HOOKS_DIR fallback.
+LIB="$(cd "$(dirname "$0")" && pwd)/web-safety-lib.sh"
+# shellcheck source=/dev/null
+[ -f "$LIB" ] && . "$LIB"
+
 # User-state directory (logs, blocklist, allowlist). Persists across plugin updates.
 # Override with WEB_SAFETY_CONFIG_DIR. Defaults to ~/.claude/hooks.
 CONFIG_DIR="${WEB_SAFETY_CONFIG_DIR:-$HOME/.claude/hooks}"
@@ -27,9 +34,36 @@ block_url() {
 
 if [ -n "$URL" ]; then
   # --- Hard blocks (security primitives — allowlist cannot override) ---
-  echo "$URL" | grep -qEi '^(data:|file:|javascript:|blob:|ftp:)' && block_url "dangerous URI scheme"
-  echo "$URL" | grep -qEi 'https?://(localhost|127\.|10\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[01])\.|0\.0\.0\.0|\[::1\]|0x|0[0-7])' && block_url "internal network (SSRF)"
-  echo "$URL" | grep -qEi '^https?://([0-9]{1,3}\.){3}[0-9]{1,3}' && block_url "direct IP address"
+  # Reject any control char (newline/CR/tab/FF/VT) ANYWHERE in the URL: it
+  # signals request-splitting / parser desync and is never valid in a real URL.
+  # Checked on the RAW value with a whole-string glob — grep/sed are
+  # line-oriented and would miss a LEADING newline.
+  case "$URL" in *[$'\t\n\r\f\v']*) block_url "control characters in URL" ;; esac
+  # Then classify a leading-whitespace-trimmed copy so a leading space can't slip
+  # the byte-0-anchored scheme/SSRF checks (the fetcher trims it). Strip BOTH
+  # ASCII and Unicode leading whitespace/zero-width (NBSP, line/para separators,
+  # ideographic space, ZWSP, BOM): sed's [[:space:]] is ASCII-only in the C
+  # locale, so a leading NBSP would otherwise skip the whole SSRF classification.
+  URL_C=$(printf '%s' "$URL" | perl -CSD -pe 's/^[\x09\x0a\x0b\x0c\x0d\x20\x{0085}\x{00A0}\x{1680}\x{2000}-\x{200B}\x{2028}\x{2029}\x{202F}\x{205F}\x{3000}\x{FEFF}]+//' 2>/dev/null)
+  printf '%s' "$URL_C" | grep -qEi '^(data:|file:|javascript:|blob:|ftp:)' && block_url "dangerous URI scheme"
+  # SSRF / direct-IP: normalize the host first so decimal (http://2130706433),
+  # hex (0x7f000001), octal, percent-encoded (incl. double), userinfo
+  # (a@127.0.0.1), backslash (127.0.0.1\@host), and IPv4-mapped-IPv6
+  # ([::ffff:127.0.0.1]) encodings of an internal target all resolve to the same
+  # classification. Only http(s) URLs carry a fetchable host; other schemes are
+  # handled above and a WebSearch free-text query must not be misread as a host.
+  case "$(printf '%s' "$URL_C" | tr '[:upper:]' '[:lower:]')" in
+    http://*|https://*)
+      if command -v normalize_host >/dev/null 2>&1; then
+        H=$(normalize_host "$URL_C")
+        # An http(s) URL with no extractable host (e.g. http:///path, or an
+        # authority that normalized away) is malformed/ambiguous → block.
+        [ -z "$H" ] && block_url "malformed URL (empty host)"
+        host_is_internal "$H" && block_url "internal network (SSRF)"
+        host_is_bare_ip  "$H" && block_url "direct IP address"
+      fi
+      ;;
+  esac
   [ ${#URL} -gt 2048 ] && block_url "URL exceeds 2048 chars"
   echo "$URL" | grep -qEi 'https?://[^/]*:[^/]*@' && block_url "credentials in URL"
   echo "$URL" | grep -qEi '([?&](redirect|url|next|goto|return|redir|dest|target|forward|continue|returnUrl)=https?://)' && block_url "open redirect parameter"

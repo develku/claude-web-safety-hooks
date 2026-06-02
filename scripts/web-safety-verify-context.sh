@@ -26,6 +26,12 @@ set -euo pipefail
 # Fail-closed: any unhandled error → genuine
 trap 'echo "{\"verdict\":\"genuine\",\"reason\":\"verifier error\"}" ; exit 0' ERR
 
+# Escape ERE metacharacters so a matched pattern is interpolated into grep -E as
+# a LITERAL, not a regex. Without this, bracket delimiter patterns ([inst],
+# [sys]) became character classes and over-matched unrelated text, auto-clearing
+# genuine injections as structural false positives.
+regex_escape() { printf '%s' "$1" | sed 's/[][\\.^$*+?(){}|-]/\\&/g'; }
+
 # =============================================================================
 # Input validation (fail-closed on missing input)
 # =============================================================================
@@ -135,12 +141,13 @@ check_code_fence() {
 # --- Check 2: Inside YAML string literal ---
 # Pattern: line with key: "...pattern..." or key: '...pattern...'
 check_yaml_string() {
-  local lc_pattern
+  local lc_pattern esc
   lc_pattern=$(echo "$VERIFY_PATTERN" | tr '[:upper:]' '[:lower:]')
+  esc=$(regex_escape "$lc_pattern")
 
   # Check if matched line is a YAML quoted string containing the pattern
   # Matches: key: "...pattern...", key: '...pattern...', description: "...pattern..."
-  if echo "$LOWER_MATCHED" | grep -qE '^\s*[a-z_][a-z0-9_]*:\s*["\x27].*'"$lc_pattern"; then
+  if echo "$LOWER_MATCHED" | grep -qE '^\s*[a-z_][a-z0-9_]*:\s*["\x27].*'"$esc"; then
     echo "yaml_string"
     return 0
   fi
@@ -165,17 +172,18 @@ check_yaml_string() {
 # --- Check 3: Inside JSON string ---
 # Pattern: "key": "...pattern..."
 check_json_string() {
-  local lc_pattern
+  local lc_pattern esc
   lc_pattern=$(echo "$VERIFY_PATTERN" | tr '[:upper:]' '[:lower:]')
+  esc=$(regex_escape "$lc_pattern")
 
-  if echo "$LOWER_MATCHED" | grep -qE '"[^"]*'"$lc_pattern"'[^"]*"'; then
+  if echo "$LOWER_MATCHED" | grep -qE '"[^"]*'"$esc"'[^"]*"'; then
     # Verify it looks like a JSON key-value pair (has a colon before the string)
-    if echo "$LOWER_MATCHED" | grep -qE '"[^"]*"\s*:\s*"[^"]*'"$lc_pattern"; then
+    if echo "$LOWER_MATCHED" | grep -qE '"[^"]*"\s*:\s*"[^"]*'"$esc"; then
       echo "json_string"
       return 0
     fi
     # Or it's inside a JSON array string
-    if echo "$LOWER_MATCHED" | grep -qE '\[\s*"[^"]*'"$lc_pattern"; then
+    if echo "$LOWER_MATCHED" | grep -qE '\[\s*"[^"]*'"$esc"; then
       echo "json_string"
       return 0
     fi
@@ -198,7 +206,9 @@ check_html_code() {
   fi
 
   # Check if both open and close are on the same line as match
-  if echo "$MATCHED_LINE" | grep -qiE '<(code|pre)[^>]*>.*'"$VERIFY_PATTERN"'.*</(code|pre)>'; then
+  local esc
+  esc=$(regex_escape "$VERIFY_PATTERN")
+  if echo "$MATCHED_LINE" | grep -qiE '<(code|pre)[^>]*>.*'"$esc"'.*</(code|pre)>'; then
     echo "html_code_inline"
     return 0
   fi
@@ -209,11 +219,12 @@ check_html_code() {
 # --- Check 5: Inside markdown inline code ---
 # Pattern: `...pattern...` on the same line
 check_inline_code() {
-  local lc_pattern
+  local lc_pattern esc
   lc_pattern=$(echo "$VERIFY_PATTERN" | tr '[:upper:]' '[:lower:]')
+  esc=$(regex_escape "$lc_pattern")
 
   # Check if pattern is between backticks on the same line
-  if echo "$LOWER_MATCHED" | grep -qE '`[^`]*'"$lc_pattern"'[^`]*`'; then
+  if echo "$LOWER_MATCHED" | grep -qE '`[^`]*'"$esc"'[^`]*`'; then
     echo "markdown_inline_code"
     return 0
   fi
