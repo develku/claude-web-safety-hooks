@@ -33,7 +33,7 @@ Two complementary checks:
 
 ### Unicode tag characters
 
-Invisible ASCII encoding via U+E0000–E007F range — used to smuggle instructions invisibly.
+Invisible ASCII encoding via U+E0000–E007F range — used to smuggle instructions invisibly. The only legitimate users of this range are the 3 RGI subdivision-flag emoji (England/Scotland/Wales); since v7.8.0 those are stripped by exact region code (`gbeng`/`gbsct`/`gbwls`) before flagging any residual tag char, so the flags don't trip a HIGH block while chained-faux-flag smuggling still does.
 
 ## MEDIUM severity
 
@@ -62,7 +62,7 @@ Invisible ASCII encoding via U+E0000–E007F range — used to smuggle instructi
 |---|---|
 | HTML / CSS hiding | `display:none`, `visibility:hidden`, `font-size:0`, `opacity:0;`, `position:absolute;left:-9999`, `clip:rect(0,0,0,0)` |
 | Markdown images (common) | `![img](http...`, `![image](http...` |
-| Invisible Unicode | Zero-width chars (U+200B-200D), bidi overrides (U+202A-202E), invisible fillers (Mongolian/Braille/Hangul), variation selectors, U+2028/U+2029 line separators |
+| Invisible Unicode | Zero-width chars (U+200B-200D), bidi overrides (U+202A-202E), invisible fillers (Mongolian/Braille/Hangul), variation selectors, U+2028/U+2029 line separators. *Emoji-safe since v7.8.0:* zero-width fires only when ASCII-adjacent (not between emoji), variation selectors only as a run of ≥2 (not single-selector emoji like ⚠️). |
 
 ## Evasion-resistant views
 

@@ -255,6 +255,12 @@ generate_views() {
 
   # View 4: Unicode confusable normalization — catches Cyrillic а→a, fullwidth ｉ→i, etc.
   # Also strips combining diacritical marks (U+0300-036F) and variation selectors (U+FE00-FE0F).
+  # TODO (deferred 2026-06-03, emoji-FP pass): also strip the VS supplement range
+  #   (U+E0100-E01EF) and the zero-width set (U+200B,200C,200D,FEFF,00AD) here so that
+  #   (a) the interleaved-carrier variation-selector smuggle and (b) zero-widths placed
+  #   between two non-ASCII homoglyphs reassemble into the keyword views and hit
+  #   high.pat/med.pat. Both are notify-only residuals today; the strip is FP-sensitive
+  #   against CJK IVS / native-script text, so it needs its own full-corpus FP pass.
   printf '%s' "$input" | \
     sed 's/а/a/g; s/е/e/g; s/о/o/g; s/р/p/g; s/с/c/g; s/у/y/g; s/х/x/g; s/і/i/g; s/ј/j/g; s/ѕ/s/g; s/ԁ/d/g; s/ɡ/g/g; s/ɑ/a/g; s/ε/e/g; s/ο/o/g; s/ν/v/g; s/ι/i/g; s/κ/k/g; s/τ/t/g; s/η/n/g' | \
     sed 's/ａ/a/g; s/ｂ/b/g; s/ｃ/c/g; s/ｄ/d/g; s/ｅ/e/g; s/ｆ/f/g; s/ｇ/g/g; s/ｈ/h/g; s/ｉ/i/g; s/ｊ/j/g; s/ｋ/k/g; s/ｌ/l/g; s/ｍ/m/g; s/ｎ/n/g; s/ｏ/o/g; s/ｐ/p/g; s/ｑ/q/g; s/ｒ/r/g; s/ｓ/s/g; s/ｔ/t/g; s/ｕ/u/g; s/ｖ/v/g; s/ｗ/w/g; s/ｘ/x/g; s/ｙ/y/g; s/ｚ/z/g' | \
@@ -1121,8 +1127,14 @@ done <<< "$LOW_MATCHES"
 # =============================================================================
 
 # Unicode detection uses perl -CSD for macOS compatibility (BSD grep lacks -P flag)
-# HIGH: Unicode tag characters (invisible ASCII encoding)
-if echo "$TOOL_OUTPUT" | perl -CSD -ne '$f=1 if /[\x{E0000}-\x{E007F}]/; END{exit($f?0:1)}' 2>/dev/null; then
+# HIGH: Unicode tag characters (invisible ASCII encoding). The only legitimate
+# users of tag chars are the 3 RGI subdivision flags (England/Scotland/Wales =
+# U+1F3F4 + region tags gbeng|gbsct|gbwls + U+E007F cancel); strip those exactly,
+# then flag ANY remaining tag char. Modeling legit use exactly — not by the generic
+# "flag base + tags + cancel" shape — closes the chained-faux-flag smuggle channel:
+# a shape-strip uses /g, so an attacker chains N wrappers to hide 6N arbitrary chars
+# and leaves zero residue. Exact-whitelist fails closed on any non-flag tag run.
+if echo "$TOOL_OUTPUT" | perl -CSD -ne 'my $t=$_; $t=~s/\x{1F3F4}\x{E0067}\x{E0062}(?:\x{E0065}\x{E006E}\x{E0067}|\x{E0073}\x{E0063}\x{E0074}|\x{E0077}\x{E006C}\x{E0073})\x{E007F}//g; $f=1 if $t=~/[\x{E0000}-\x{E007F}]/; END{exit($f?0:1)}' 2>/dev/null; then
   FOUND_HIGH+=("unicode tag characters (invisible ASCII encoding)")
 fi
 
@@ -1131,8 +1143,12 @@ if echo "$TOOL_OUTPUT" | perl -CSD -ne '$f=1 if /[a-zA-Z]+[\x{0400}-\x{04FF}]|[\
   FOUND_MEDIUM+=("mixed Cyrillic/Latin script (possible homoglyph attack)")
 fi
 
-# LOW: Zero-width characters
-if echo "$TOOL_OUTPUT" | perl -CSD -ne '$f=1 if /[\x{200B}\x{200C}\x{200D}\x{FEFF}\x{00AD}]/; END{exit($f?0:1)}' 2>/dev/null; then
+# LOW: Zero-width characters — only when ASCII-alphanumeric-adjacent. In emoji,
+# ZWJ/joiners (U+200D) sit between pictographic (non-ASCII) chars; in pattern-break
+# attacks ("ig<ZWSP>nore") they sit between ASCII letters. Requiring adjacency is a
+# strict subset of the old membership test — it removes 0 legit-text coverage but
+# stops firing on every ZWJ-sequence emoji (family/profession/pride+trans flags).
+if echo "$TOOL_OUTPUT" | perl -CSD -ne '$f=1 if /[A-Za-z0-9][\x{200B}\x{200C}\x{200D}\x{FEFF}\x{00AD}]|[\x{200B}\x{200C}\x{200D}\x{FEFF}\x{00AD}][A-Za-z0-9]/; END{exit($f?0:1)}' 2>/dev/null; then
   FOUND_LOW+=("zero-width/invisible characters")
 fi
 
@@ -1156,8 +1172,14 @@ if echo "$TOOL_OUTPUT" | perl -CSD -ne '$f=1 if /[\x{2028}\x{2029}]/; END{exit($
   FOUND_LOW+=("unicode line/paragraph separators")
 fi
 
-# LOW: Variation selectors (can be inserted between chars to break pattern matching)
-if echo "$TOOL_OUTPUT" | perl -CSD -ne '$f=1 if /[\x{FE00}-\x{FE0F}\x{E0100}-\x{E01EF}]/; END{exit($f?0:1)}' 2>/dev/null; then
+# LOW: Variation selectors — only a RUN of >=2 consecutive. Unicode binds exactly
+# one variation selector to each base char, so conformant text never stacks >=2
+# (emoji presentation, keycaps, and CJK IVS all interpose a non-selector base);
+# steganographic smuggling stacks one selector per hidden byte, i.e. a long run.
+# The {2,} quantifier drops every benign single-selector emoji hit while still
+# catching the smuggling run. (Residual: interleaving one visible carrier char per
+# selector evades this — acceptable for a notify-only check; see View-4 TODO.)
+if echo "$TOOL_OUTPUT" | perl -CSD -ne '$f=1 if /[\x{FE00}-\x{FE0F}\x{E0100}-\x{E01EF}]{2,}/; END{exit($f?0:1)}' 2>/dev/null; then
   FOUND_LOW+=("variation selectors (pattern-breaking invisible chars)")
 fi
 

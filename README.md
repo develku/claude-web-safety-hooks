@@ -40,7 +40,7 @@ web-safety/
 │   ├── web-safety-listctl.sh         # backs /web-safety-allow + /web-safety-block
 │   └── web-safety-report.sh          # backs /web-safety-report
 ├── commands/                         # 3 user-invoked slash commands (auto-discovered)
-├── tests/                            # 3 suites · 167 cases · Linux+macOS CI
+├── tests/                            # 3 suites · 173 cases · Linux+macOS CI
 └── docs/                             # patterns.md, tuning.md, design specs
 ```
 
@@ -129,6 +129,7 @@ Three slash commands ship with the plugin (auto-discovered on install). All are 
 
 Full per-version detail in [CHANGELOG.md](CHANGELOG.md). Recent releases:
 
+- **7.8.0** — Emoji false-positive pass verified against the full Unicode emoji corpus (3,944 glyphs): the variation-selector check now requires a run of ≥2 (was firing on every `FE0F` emoji like ⚠️ ❤️), the zero-width check requires ASCII-adjacency (was firing on every ZWJ emoji — families, professions, 🏳️‍🌈), and the HIGH tag-char check strips the 3 real subdivision flags by exact region code before flagging residue (England/Scotland/Wales flags were being *blocked + sanitized*). Scanner suite → 53 cases.
 - **7.7.0** — Minor roll-up completing a 15-finding review: leetspeak loop now reports every obfuscated pattern (not just the first), escalation tool list renders with a real `, ` separator, `listctl` add is atomic, the `SESSION_STATE` prune is lock-guarded, and the allowlist honors a final entry without a trailing newline.
 - **7.6.0** — Closed two HIGH false-negatives: base64 detection strengthened (CR/LF-stripping, lower threshold, decode-vs-real-patterns) and cross-call reassembly evasions (head+tail excerpt, completing-fragment capture, full 14-category lexicon). Affix index made per-word + fired-set de-dup after the gate found an FP-storm.
 - **7.5.0** — Layer 6 now also guards the **web-fetch** channel (fetch to a non-allowlisted host while armed) and adopts the shared host library; upload-aware allowlist (an upload *to* an allowlisted host is no longer exempt).
@@ -147,12 +148,12 @@ Full per-version detail in [CHANGELOG.md](CHANGELOG.md). Recent releases:
 ## Tests
 
 ```bash
-./tests/run-tests.sh        # scanner — 47 cases
+./tests/run-tests.sh        # scanner — 53 cases
 ./tests/run-cmd-tests.sh    # command helpers — 49 cases
 ./tests/run-egress-tests.sh # Layer 6 egress guard — 71 cases
 ```
 
-47 scanner cases (single-fetch payloads + multi-fetch reassembly sequences + enforcement / large-input / performance assertions) across HIGH/MEDIUM/LOW/legit/reassembly buckets, covering all 8 evasion views, base64-encoded payloads, hex/decimal HTML-entity decoding, Layer-5 false-positive guards, multi-pattern HIGH combinations, ordering-token reorder attacks, cross-session isolation, letter-boundary and tail-split reassembly, already-fired suppression, 3-char affix-only fragments, confusable-letter bridges, multi-technique leetspeak, and a 256 KB-page performance budget. A second suite (`run-cmd-tests.sh`) covers the report and allow/block helper scripts — including atomic/concurrent list adds, allowlist normalization, and SSRF hard-block classes through the pre-screen. A third (`run-egress-tests.sh`) covers the Layer 6 outbound exfiltration guard across **both** the Bash and web-fetch channels — arm-state production, the ask/defer decision, allowlist exemption and upload-aware non-exemption, session isolation, and path-qualified-binary boundary cases. All three run in CI on a Linux + macOS matrix. See [tests/README.md](tests/README.md).
+53 scanner cases (single-fetch payloads + multi-fetch reassembly sequences + enforcement / large-input / performance assertions) across HIGH/MEDIUM/LOW/legit/reassembly buckets, covering all 8 evasion views, base64-encoded payloads, hex/decimal HTML-entity decoding, Layer-5 false-positive guards, multi-pattern HIGH combinations, ordering-token reorder attacks, cross-session isolation, letter-boundary and tail-split reassembly, already-fired suppression, 3-char affix-only fragments, confusable-letter bridges, multi-technique leetspeak, emoji false-positive guards (variation-selector / ZWJ / subdivision-flag, verified against the full 3,944-emoji Unicode corpus), and a 256 KB-page performance budget. A second suite (`run-cmd-tests.sh`) covers the report and allow/block helper scripts — including atomic/concurrent list adds, allowlist normalization, and SSRF hard-block classes through the pre-screen. A third (`run-egress-tests.sh`) covers the Layer 6 outbound exfiltration guard across **both** the Bash and web-fetch channels — arm-state production, the ask/defer decision, allowlist exemption and upload-aware non-exemption, session isolation, and path-qualified-binary boundary cases. All three run in CI on a Linux + macOS matrix. See [tests/README.md](tests/README.md).
 
 ## License
 

@@ -178,6 +178,7 @@ This is **not bulletproof**. Be aware:
 - **Pattern-based detection** — the scanner catches known patterns. Novel injection techniques not in the pattern database may bypass it.
 - **Cross-tool correlation is count-based** — escalates when multiple tools are flagged but does not reassemble payloads split across tool calls.
 - **Evasion views are additive** — each new normalisation view adds coverage but also increases the surface for false positives on security-focused content.
+- **Invisible-character precision has residuals** — the emoji false-positive pass (v7.8.0) tightened the variation-selector (run ≥2), zero-width (ASCII-adjacency), and tag-char (exact subdivision-flag whitelist) predicates so legitimate emoji no longer trip them. Two notify-only smuggle residuals remain, tracked as View-4 normalizer TODOs: interleaved-carrier variation selectors, and zero-widths placed between two non-ASCII homoglyphs.
 - **Not a substitute for human review** — the permission system (you approving tool calls) remains the strongest protection.
 - **macOS-only notifications** — desktop notifications use `osascript`; the scanner works cross-platform without them.
 
