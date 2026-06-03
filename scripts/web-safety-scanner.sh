@@ -1327,7 +1327,7 @@ if [ "$LOW_COUNT" -gt 0 ]; then
 fi
 
 # =============================================================================
-# Structural context verification for MED_GENERIC_DELIMITERS (v4.2)
+# Structural context verification for MED_GENERIC_DELIMITERS (v5.1.1)
 # Auto-clears MEDIUM matches that are inside code fences, YAML strings, etc.
 # Only applies to MED_GENERIC_DELIMITERS patterns. All other MEDIUM patterns
 # remain human-reviewed. Fail-closed: errors/timeouts → keep the match.
