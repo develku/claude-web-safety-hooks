@@ -17,6 +17,11 @@ LIB="$(cd "$(dirname "$0")" && pwd)/web-safety-lib.sh"
 # shellcheck source=/dev/null
 [ -f "$LIB" ] && . "$LIB"
 
+# Cross-platform notification dispatcher (notify_dispatch). Sibling file.
+NOTIFY_LIB="$(cd "$(dirname "$0")" && pwd)/web-safety-notify.sh"
+# shellcheck source=/dev/null
+[ -f "$NOTIFY_LIB" ] && . "$NOTIFY_LIB"
+
 # User-state directory (logs, blocklist, allowlist). Persists across plugin updates.
 # Override with WEB_SAFETY_CONFIG_DIR. Defaults to ~/.claude/hooks.
 CONFIG_DIR="${WEB_SAFETY_CONFIG_DIR:-$HOME/.claude/hooks}"
@@ -33,9 +38,10 @@ block_url() {
   # web-safety-report.sh later trusts (log injection, #12).
   local LOG_URL; LOG_URL=$(printf '%s' "$URL" | tr -d '\000-\037\177' | cut -c1-256)
   echo "[$(date '+%Y-%m-%d %H:%M:%S')] [PRE-BLOCK] url=$LOG_URL reason=$1" >> "$LOG"
-  # Show the offending URL as subtitle (truncated, AppleScript metacharacters stripped).
-  SAFE_URL=$(printf '%s' "$URL" | cut -c1-120 | tr -d '"\\')
-  osascript -e "display notification \"$1\" with title \"🛡️ URL Blocked\" subtitle \"${SAFE_URL}\" sound name \"Funk\"" >/dev/null 2>&1 &
+  # Show the offending URL as subtitle (truncated; the dispatcher applies the
+  # per-platform metacharacter escaping).
+  SAFE_URL=$(printf '%s' "$URL" | cut -c1-120)
+  notify_dispatch "HIGH" "🛡️ URL Blocked" "$1" "$SAFE_URL" "Funk"
   jq -n --arg r "Pre-screening blocked: $1" '{"decision":"block","reason":$r}'
   exit 0
 }

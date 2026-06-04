@@ -2,6 +2,70 @@
 
 All notable changes to this project. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [7.9.0] — 2026-06-04
+
+Cross-platform desktop notifications (part 1 of 2: macOS + Linux). The three
+notification call sites were hardcoded to macOS `osascript`, so on Linux —
+where Claude Code runs natively — a HIGH/MEDIUM/LOW alert, an exfiltration-guard
+prompt, or a URL pre-block fired **no desktop notification at all**: detection
+worked, but the user was never told. This release centralizes notification into
+one platform-aware dispatcher and adds the Linux path. macOS behaviour is
+byte-identical. (Windows toast support lands in 7.10.0.)
+
+### Added
+
+- **`scripts/web-safety-notify.sh`** — a sourced dispatcher (`notify_dispatch`)
+  that detects the platform (`macos`/`linux`/`wsl`/`windows`/`none`, WSL checked
+  before generic Linux) and routes to the right notifier. The scanner
+  (`send_notification`), exfiltration guard (`emit_ask`), and URL pre-screen
+  (`block_url`) now all go through it instead of each embedding its own
+  `osascript` call.
+- **Linux notifications via `notify-send`** (libnotify), with severity mapped to
+  urgency (HIGH→`critical` sticky, MEDIUM→`normal`, LOW→`low`) and best-effort
+  sound through `canberra-gtk-play` → `paplay` → `pw-play` (silent if none is
+  installed). The macOS "subtitle" (which carries the URL) is folded into the
+  body, since libnotify has no subtitle concept.
+
+### Changed
+
+- The scanner keeps its 5-second rate-limit gate; the PreToolUse hooks remain
+  un-throttled (they fire only on a hard block / armed-egress event). The macOS
+  `osascript` path — heredoc, `"`/`\` strip, synchronous, fully redirected — is
+  preserved unchanged, including the Funk / Sosumi / Basso / Ping sound cues.
+- The PreToolUse notifications are now synchronous (matching the scanner) rather
+  than backgrounded with `&`, which the scanner already documented as unreliable
+  (the `&` child can be killed when the hook's process group exits).
+
+### Security
+
+- **Per-platform sanitization replaces the macOS-only model.** `osascript`
+  re-evaluates a string literal (so `"`/`\` are the metacharacters); Linux
+  `notify-send` takes argv (no shell re-eval), so the real risks are different
+  and the old strip would have been both wrong and insufficient. The Linux path:
+  (1) a literal `--` end-of-options guard so an attacker-controlled title/body
+  starting with `-`/`--` cannot be parsed as a flag (option-injection); (2)
+  Pango/XML markup escaping (`&` first, then `<` `>`) so daemons that render the
+  body via `gtk_label_set_markup()` (e.g. XFCE) don't drop or mis-parse a body
+  containing `&`; (3) a C0+DEL control-char strip (`\000-\037\177`, matching the
+  existing URL scrub) under `LC_ALL=C`.
+- **Hook stdout integrity.** A Claude Code hook's stdout is parsed as JSON; the
+  dispatcher never writes to stdout and swallows all notifier output
+  (`>/dev/null 2>&1`), with a regression test that fails if a noisy notifier
+  leaks even one byte onto the control channel.
+- **Fail-safe by default.** A missing notifier, a headless/SSH/cron session with
+  no `DBUS_SESSION_BUS_ADDRESS`, or any unsupported platform is a silent no-op —
+  the hook never blocks and detection is unaffected.
+
+### Tests
+
+- New suite **`tests/run-notify-tests.sh`** (15 cases), wired into CI on both the
+  Linux and macOS legs: platform detection across the matrix, markup-escape
+  ordering, the control-char strip, the `--` option-injection guard, the
+  severity→urgency mapping, the headless no-DBUS skip, the best-effort sound
+  selection, the zero-stdout-leak invariant, and macOS-path preservation.
+  Platform is driven by stubbing `uname` so the matrix is deterministic on any
+  host. All prior suites remain green (scanner 53, cmd 49, egress 71).
+
 ## [7.8.0] — 2026-06-03
 
 Emoji false-positive pass. The invisible-character detectors fired on ordinary

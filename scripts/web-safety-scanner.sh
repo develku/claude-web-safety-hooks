@@ -64,6 +64,13 @@ HIGH_SEVERITY_ACTION="${HIGH_SEVERITY_ACTION:-stop}"
 HOOKS_DIR="${CLAUDE_PLUGIN_ROOT:+${CLAUDE_PLUGIN_ROOT}/scripts}"
 HOOKS_DIR="${HOOKS_DIR:-$(cd "$(dirname "$0")" && pwd)}"
 
+# Cross-platform notification dispatcher (notify_dispatch). Sibling file in
+# scripts/, resolved in both plugin and standalone/test runs. Mirrors the LIB
+# sourcing pattern used by the PreToolUse hooks.
+NOTIFY_LIB="$HOOKS_DIR/web-safety-notify.sh"
+# shellcheck source=/dev/null
+[ -f "$NOTIFY_LIB" ] && . "$NOTIFY_LIB"
+
 # CONFIG_DIR — user-state (log, blocklist, allowlist). Persists across plugin
 # updates. Override with WEB_SAFETY_CONFIG_DIR. Defaults to ~/.claude/hooks.
 CONFIG_DIR="${WEB_SAFETY_CONFIG_DIR:-$HOME/.claude/hooks}"
@@ -1512,25 +1519,10 @@ send_notification() {
   # Update rate limit timestamp
   date +%s > "$RATE_LIMIT_FILE"
 
-  # Send macOS notification via osascript heredoc
-  # Sanitize inputs: strip double quotes AND backslashes to prevent AppleScript
-  # injection — both are AppleScript string-literal metacharacters, and the
-  # subtitle now carries untrusted content (URLs from web tool input).
-  local safe_title="${title//[\"\\]/ }"
-  local safe_message="${message//[\"\\]/ }"
-  local safe_subtitle="${subtitle//[\"\\]/ }"
-  # Run synchronously — backgrounding with & causes the process to be killed
-  # when Claude Code terminates the hook's process group
-  # Redirect BOTH stdout and stderr to prevent JSON output corruption
-  if [ -n "$safe_subtitle" ]; then
-    osascript <<EOF >/dev/null 2>&1
-display notification "${safe_message}" with title "${safe_title}" subtitle "${safe_subtitle}" sound name "${sound}"
-EOF
-  else
-    osascript <<EOF >/dev/null 2>&1
-display notification "${safe_message}" with title "${safe_title}" sound name "${sound}"
-EOF
-  fi
+  # Cross-platform dispatch (macOS osascript / Linux notify-send / Windows toast
+  # in PR #2). Per-platform sanitization lives in the dispatcher; the macOS sound
+  # name is passed through so the Basso/Sosumi/Ping cues are preserved unchanged.
+  notify_dispatch "$severity" "$title" "$message" "$subtitle" "$sound"
 }
 
 # =============================================================================
