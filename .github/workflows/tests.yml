@@ -52,3 +52,14 @@ jobs:
 
       - name: Run notification dispatcher test suite
         run: ./tests/run-notify-tests.sh
+
+      - name: Validate embedded Windows toast PowerShell (pwsh parser)
+        # No Windows runner exists, so the WinRT toast can't run here — but the
+        # runner-provided pwsh can parse-check the embedded script for SYNTAX
+        # errors (a syntax error would silently break the toast on Windows).
+        run: |
+          command -v pwsh >/dev/null 2>&1 || { echo "pwsh not on runner; skipping"; exit 0; }
+          awk "/-Command '/{f=1;next} /^' >/{f=0} f" scripts/web-safety-notify.sh > toast_block.ps1
+          test -s toast_block.ps1 || { echo "FAIL: PowerShell block extraction empty"; exit 1; }
+          pwsh -NoProfile -Command "\$e=\$null; [void][System.Management.Automation.Language.Parser]::ParseInput((Get-Content -Raw ./toast_block.ps1),[ref]\$null,[ref]\$e); if(\$e){\$e|ForEach-Object{Write-Host \$_.Message}; exit 1}; Write-Host 'OK: toast PowerShell parses cleanly'"
+          rm -f toast_block.ps1
