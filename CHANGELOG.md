@@ -2,6 +2,52 @@
 
 All notable changes to this project. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [7.8.0] — 2026-06-03
+
+Emoji false-positive pass. The invisible-character detectors fired on ordinary
+emoji because they matched on *membership* of a code-point class. Verified against
+the full Unicode `emoji-test.txt` corpus (3,944 fully-qualified emoji), three
+predicates were over-broad — including a HIGH/blocking one. Each fix tightens the
+predicate to model legitimate use precisely while preserving attack detection
+(re-verified across the corpus and by adversarial evasion attempts).
+
+### Fixed (false positives)
+
+- **Variation selectors no longer fire on emoji presentation.** `U+FE0F` (the emoji
+  presentation selector) is attached to ~30% of all emoji (☺️ ⚠️ ❤️), keycaps, and
+  CJK ideographic variation sequences. The check now requires a **run of ≥2
+  consecutive** variation selectors — Unicode binds exactly one selector per base, so
+  conformant text never stacks two, while steganographic smuggling stacks one per
+  hidden byte. 1,180 → 0 emoji false positives.
+- **Zero-width check no longer fires on ZWJ-sequence emoji.** `U+200D` (ZWJ) is
+  mandatory in every modern ZWJ emoji (families, professions, 🏳️‍🌈 / 🏳️‍⚧️ flags) —
+  ~41% of the corpus. The check now requires the zero-width char to be **adjacent to
+  an ASCII alphanumeric** (where pattern-break attacks like `ig‍nore` live), a strict
+  subset of the old test. 1,614 → 0 emoji false positives.
+- **Tag-char HIGH check no longer blocks subdivision-flag emoji.** England / Scotland
+  / Wales flags (🏴󠁧󠁢󠁥󠁮󠁧󠁿 etc.) carry `U+E0000–E007F` tag chars and were being
+  **blocked + sanitized** as invisible-ASCII smuggling. The check now strips the 3
+  real RGI subdivision flags **by exact region code** (`gbeng` / `gbsct` / `gbwls`),
+  then flags any residual tag char. Modeling legit use exactly — not by the generic
+  `flag + tags + cancel` shape — closes a chained-faux-flag smuggle channel a
+  shape-strip would open (each `/g`-stripped wrapper hides 6 chars; chaining → unbounded).
+  3 → 0 emoji false positives; the chaining attack still fires.
+
+### Tests
+
+- Six scanner payloads added (47 → 53): `legit-emoji-vs16`, `legit-emoji-zwj`,
+  `legit-emoji-subdivision-flags` (RED→GREEN false-positive guards) and
+  `low-vs-smuggle`, `low-zw-break`, `high-tag-smuggle` (attack-retention guards,
+  including the chained-faux-flag evasion).
+
+### Known limitations (deferred)
+
+- Two View-4 normalizer hardening items are tracked as code TODOs (not in this pass;
+  FP-sensitive against CJK / native-script text): stripping the VS supplement range
+  `U+E0100–E01EF` (closes the interleaved-carrier VS smuggle) and the zero-width set
+  (closes a minor LOW *notify*-loss when a zero-width sits between two non-ASCII
+  homoglyphs). Both are notify-only / non-blocking residuals.
+
 ## [7.7.0] — 2026-06-02
 
 Minor roll-up (PR 5 of the staged review) — the `#15` cluster of small
