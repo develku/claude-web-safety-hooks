@@ -210,8 +210,9 @@ check_eq "strip: C0/DEL/TAB/LF/CR all removed" "abcde" \
   export DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/1000/bus"
   export SND_CAP="$TMP_ROOT/snd.cap"; : >"$SND_CAP"
   notify_dispatch HIGH "Title" "body" "" >/dev/null 2>&1
-  # the sound player runs backgrounded; give it a beat to write
-  sleep 0.3
+  # The sound player runs backgrounded (&); `wait` blocks for it deterministically
+  # — a fixed `sleep` is a race that flakes under load.
+  wait 2>/dev/null
   if grep -q "dialog-error" "$SND_CAP" 2>/dev/null; then
     pass "linux: HIGH plays dialog-error sound (best-effort)"
   else
