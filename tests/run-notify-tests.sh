@@ -64,6 +64,19 @@ exit 0
 EOF
 done
 
+# powershell.exe stub: the Windows path passes title/subtitle/body via WST_* env
+# vars (never interpolated into the -Command string). Record those env vars to
+# $PS_CAP, and optionally leak $PS_LEAK to stdout to prove the dispatcher swallows
+# it. (The real WinRT toast / XML escaping needs Windows and can't run here; these
+# tests pin the bash-side contract: routing, env-var passing, control/CRLF strip,
+# sound mapping, and stdout integrity.)
+cat >"$FAKE_BIN/powershell.exe" <<'EOF'
+#!/bin/sh
+[ -n "${PS_LEAK:-}" ] && echo "$PS_LEAK"
+if [ -n "${PS_CAP:-}" ]; then env | grep '^WST_' >> "$PS_CAP"; fi
+exit 0
+EOF
+
 chmod +x "$FAKE_BIN"/*
 export PATH="$FAKE_BIN:$PATH"
 
@@ -197,8 +210,9 @@ check_eq "strip: C0/DEL/TAB/LF/CR all removed" "abcde" \
   export DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/1000/bus"
   export SND_CAP="$TMP_ROOT/snd.cap"; : >"$SND_CAP"
   notify_dispatch HIGH "Title" "body" "" >/dev/null 2>&1
-  # the sound player runs backgrounded; give it a beat to write
-  sleep 0.3
+  # The sound player runs backgrounded (&); `wait` blocks for it deterministically
+  # — a fixed `sleep` is a race that flakes under load.
+  wait 2>/dev/null
   if grep -q "dialog-error" "$SND_CAP" 2>/dev/null; then
     pass "linux: HIGH plays dialog-error sound (best-effort)"
   else
@@ -222,6 +236,92 @@ check_eq "strip: C0/DEL/TAB/LF/CR all removed" "abcde" \
 
 # grep -c prints 0 (exit 1) when there are no matches; the file always exists, so
 # read the count directly — a `|| echo 0` would append a SECOND 0 and break $(()).
+# =============================================================================
+# 10. Windows toast path (PR #2). The real WinRT toast needs Windows; here we
+#     pin the bash-side contract that the Windows code must satisfy.
+# =============================================================================
+
+# 10a. Native Git-Bash (MINGW*) routes to powershell.exe.
+(
+  export FAKE_UNAME_S=MINGW64_NT-10.0
+  export PS_CAP="$TMP_ROOT/ps-route.cap"; : >"$PS_CAP"
+  notify_dispatch HIGH "WinTitle" "win body" "win sub" >/dev/null 2>&1
+  if [ -s "$PS_CAP" ]; then
+    pass "windows: MINGW routes to powershell.exe with WST_* env"
+  else
+    fail "windows: powershell.exe not invoked on MINGW (no WST_* env captured)"
+  fi
+)
+
+# 10b. Title/body are passed via env vars (not interpolated into -Command).
+(
+  export FAKE_UNAME_S=MINGW64_NT-10.0
+  export PS_CAP="$TMP_ROOT/ps-env.cap"; : >"$PS_CAP"
+  notify_dispatch MEDIUM "MyTitle" "MyBody" "" >/dev/null 2>&1
+  if grep -qx "WST_TITLE=MyTitle" "$PS_CAP" 2>/dev/null && grep -qx "WST_BODY=MyBody" "$PS_CAP" 2>/dev/null; then
+    pass "windows: title/body passed via WST_* env vars"
+  else
+    fail "windows: WST_TITLE/WST_BODY env contract not met"
+  fi
+)
+
+# 10c. Bash-side defense-in-depth strips C0/DEL AND CR/LF (toast UI-spoof guard)
+#      before the value crosses to PowerShell. 0x01 + CRLF must be gone.
+(
+  export FAKE_UNAME_S=MINGW64_NT-10.0
+  export PS_CAP="$TMP_ROOT/ps-strip.cap"; : >"$PS_CAP"
+  notify_dispatch LOW "$(printf 'Ti\001tle\r\nX')" "body" "" >/dev/null 2>&1
+  if grep -qx "WST_TITLE=TitleX" "$PS_CAP" 2>/dev/null; then
+    pass "windows: bash strips C0/DEL + CR/LF before PowerShell"
+  else
+    fail "windows: control/CRLF not stripped on the bash side ($(grep '^WST_TITLE=' "$PS_CAP" 2>/dev/null))"
+  fi
+)
+
+# 10d. Severity → ms-winsoundevent mapping (HIGH = Notification.Reminder).
+(
+  export FAKE_UNAME_S=MINGW64_NT-10.0
+  export PS_CAP="$TMP_ROOT/ps-snd.cap"; : >"$PS_CAP"
+  notify_dispatch HIGH "T" "b" "" >/dev/null 2>&1
+  if grep -qx "WST_SOUND=Notification.Reminder" "$PS_CAP" 2>/dev/null; then
+    pass "windows: HIGH → ms-winsoundevent Notification.Reminder"
+  else
+    fail "windows: HIGH sound not mapped to Notification.Reminder"
+  fi
+)
+
+# 10e. Stdout integrity — a noisy powershell.exe must not leak onto JSON stdout.
+(
+  export FAKE_UNAME_S=MINGW64_NT-10.0
+  export PS_LEAK="WIN_GARBAGE"
+  export PS_CAP="$TMP_ROOT/ps-leak.cap"; : >"$PS_CAP"
+  out=$(notify_dispatch HIGH "T" "b" "" 2>/dev/null)
+  if [ ! -s "$PS_CAP" ]; then
+    fail "windows: dispatcher never reached powershell.exe (cannot test leak)"
+  elif [ -z "$out" ]; then
+    pass "windows: dispatcher emits nothing even when powershell is noisy"
+  else
+    fail "windows: powershell output leaked onto hook stdout: [$out]"
+  fi
+)
+
+# 10f. Fail-safe — MINGW but NO powershell.exe on PATH ⇒ clean no-op (no crash,
+#      no stdout). Uses a minimal PATH containing only a uname stub.
+(
+  NOPS="$TMP_ROOT/nops"; mkdir -p "$NOPS"
+  printf '#!/bin/sh\necho MINGW64_NT-10.0\n' > "$NOPS/uname"; chmod +x "$NOPS/uname"
+  if ! have_dispatch; then
+    fail "windows: fail-safe — notify_dispatch not defined"
+  else
+    out=$(PATH="$NOPS" notify_dispatch HIGH "T" "b" "" 2>/dev/null); rc=$?
+    if [ "$rc" -eq 0 ] && [ -z "$out" ]; then
+      pass "windows: no powershell.exe → clean no-op (no crash, no stdout)"
+    else
+      fail "windows: missing powershell.exe not handled fail-safe (rc=$rc out=[$out])"
+    fi
+  fi
+)
+
 PASS=$(grep -c '^P' "$RESULTS"); PASS=${PASS:-0}
 FAIL=$(grep -c '^F' "$RESULTS"); FAIL=${FAIL:-0}
 
