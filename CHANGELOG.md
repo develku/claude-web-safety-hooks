@@ -2,6 +2,59 @@
 
 All notable changes to this project. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [7.10.0] — 2026-06-04
+
+Cross-platform desktop notifications (part 2 of 2: Windows). Completes v7.9.0 by
+adding the Windows toast path to the dispatcher, so a Claude Code user on native
+Windows (Git Bash) or WSL gets the same HIGH/MEDIUM/LOW + exfiltration-guard +
+URL-block desktop alerts as macOS and Linux.
+
+### Added
+
+- **Windows toast via `powershell.exe` + WinRT** in `_notify_windows`. Severity
+  maps to the `ms-winsoundevent` catalog (HIGH→Notification.Reminder,
+  MEDIUM→Notification.SMS, LOW→Notification.Default). On WSL the dispatcher
+  prefers in-distro `notify-send` when a display is reachable (WSLg) and falls
+  back to the Windows toast via interop otherwise.
+
+### Security
+
+- **Title/subtitle/body are passed as environment variables (`WST_*`)**, never
+  interpolated into the `-Command` string — an attacker-controlled string cannot
+  break out of the script or the toast XML.
+- **PowerShell is the authoritative sanitizer** (the only layer guaranteed to run
+  even if the hook is ever invoked outside bash on native Windows): it drops every
+  XML-1.0-illegal char — C0, DEL, lone surrogates, non-chars, and CR/LF — *before*
+  `LoadXml`, then XML-escapes via `SecurityElement::Escape`. This closes a real
+  alert-suppression DoS: a raw control char in an attacker URL would otherwise make
+  `LoadXml` throw so the toast silently never fires. Dropping CR/LF also blocks
+  multi-line toast UI-spoofing. The bash side additionally strips C0/DEL+CRLF as
+  defense-in-depth.
+- `powershell.exe` runs `-NoProfile -NonInteractive -WindowStyle Hidden`, fully
+  output-redirected, wrapped in `try/catch` so a `LoadXml` throw or a missing AUMID
+  can never abort the hook or corrupt its JSON stdout. A missing `powershell.exe`
+  is a silent no-op.
+
+### Tests
+
+- `run-notify-tests.sh` → 21 cases (+6 Windows): MINGW routing, the `WST_*`
+  env-var contract, the bash-side control/CRLF strip, the severity→
+  ms-winsoundevent mapping, the zero-stdout-leak invariant, and the
+  no-powershell fail-safe. Platform is driven by stubbing `uname` so the matrix
+  stays deterministic on the Linux + macOS CI legs.
+- New CI step parse-checks the embedded toast PowerShell with the runner's
+  `pwsh` — there is no Windows CI, so this catches a syntax error that would
+  otherwise silently break the toast on Windows. All prior suites stay green
+  (scanner 53, cmd 49, egress 71).
+
+### Known limitations
+
+- The WinRT toast itself (vs its PowerShell syntax) is not exercised in CI — there
+  is no Windows runner — so it is validated by construction, the bash-side contract
+  tests, and the `pwsh` parse-check. The built-in PowerShell AUMID shows "Windows
+  PowerShell" as the toast source app; a branded AUMID would require a one-time
+  Start-Menu shortcut registration (out of scope).
+
 ## [7.9.0] — 2026-06-04
 
 Cross-platform desktop notifications (part 1 of 2: macOS + Linux). The three

@@ -17,7 +17,8 @@
 #   - macOS osascript re-evaluates a string literal  → strip " and \
 #   - Linux notify-send takes argv (no shell re-eval) → `--` option guard +
 #     Pango/XML markup-escape (& first) + C0/DEL control strip
-#   - Windows toast is XML markup                      → handled in PR #2
+#   - Windows toast is XML markup                      → strip XML-illegal chars
+#     + SecurityElement::Escape inside PowerShell (authoritative)
 
 # notify_platform — echo one of: macos | linux | wsl | windows | none
 # WSL is checked BEFORE generic linux (its `uname -s` is also "Linux").
@@ -37,19 +38,24 @@ notify_platform() {
   esac
 }
 
-# _notify_escape_body <text> — sanitize untrusted text for a Linux notify-send
-# summary/body. Two real risks (the macOS quote/backslash strip is the WRONG
-# model here — argv has no shell/string re-eval):
-#   1. control chars: strip C0 + DEL (\000-\037\177), matching scanner.sh:164.
-#      LC_ALL=C makes tr byte-wise so arbitrary attacker bytes can't trip a
-#      "illegal byte sequence" error under a UTF-8 locale.
-#   2. Pango/XML markup: daemons rendering the body via gtk_label_set_markup()
-#      (e.g. XFCE) treat & < > as markup and silently drop a body with a raw &.
-#      Escape & FIRST, else `<` becomes `&amp;lt;` (double-escape).
+# _notify_strip_ctl <text> — remove C0 control chars + DEL (\000-\037\177),
+# which also removes CR/LF (single-line guard against toast/log spoofing).
+# Matches the scanner.sh:164 scrub. LC_ALL=C makes tr byte-wise so arbitrary
+# attacker bytes can't trip an "illegal byte sequence" error under a UTF-8
+# locale. Shared by the Linux and Windows senders; the macOS quote/backslash
+# strip is a separate, OS-specific model.
+_notify_strip_ctl() {
+  printf '%s' "$1" | LC_ALL=C tr -d '\000-\037\177'
+}
+
+# _notify_escape_body <text> — Linux notify-send sanitizer: control-strip, then
+# Pango/XML markup-escape. notify-send takes argv (no shell re-eval), so the two
+# real risks are option-injection (guarded by `--` at the call site) and markup:
+# daemons rendering the body via gtk_label_set_markup() (e.g. XFCE) treat & < >
+# as markup and silently drop a body with a raw &. Escape & FIRST, else `<`
+# becomes `&amp;lt;` (double-escape).
 _notify_escape_body() {
-  printf '%s' "$1" \
-    | LC_ALL=C tr -d '\000-\037\177' \
-    | sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g'
+  _notify_strip_ctl "$1" | sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g'
 }
 
 # Severity → platform-specific alert style.
@@ -121,9 +127,63 @@ _notify_linux() {
   fi
 }
 
-# _notify_windows — implemented in PR #2 (WinRT toast via powershell.exe).
-# A clean no-op for now so `windows`/`wsl`-without-display routing is safe.
-_notify_windows() { return 0; }
+# _notify_windows <severity> <title> <message> <subtitle>
+# Native Windows toast via Windows PowerShell + WinRT. Title/subtitle/body are
+# passed as ENV VARS (WST_*), NEVER interpolated into the -Command string, so an
+# attacker string cannot break out of the script or the toast XML.
+#
+# PowerShell is the AUTHORITATIVE sanitizer (the only layer guaranteed to run):
+# X() keeps only printable chars (code point >= 32, excluding DEL 127, the lone
+# surrogate range 55296-57343, and non-chars 65534/65535) — dropping every
+# XML-1.0-illegal char (incl. CR/LF, so the toast stays single-line) BEFORE
+# LoadXml. Otherwise a raw control char makes LoadXml throw and the toast never
+# fires (attacker-controlled alert suppression). It THEN XML-escapes via
+# SecurityElement::Escape. The bash side also strips C0/DEL+CRLF as
+# defense-in-depth. $sound and $AppId are trusted constants, never derived from
+# tool output. try/catch keeps a throw or a missing AUMID from aborting the hook;
+# output is fully redirected so the hook's JSON stdout is never corrupted.
+_notify_windows() {
+  local severity="$1" title="$2" message="$3" subtitle="$4"
+  command -v powershell.exe >/dev/null 2>&1 || return 0
+
+  local snd
+  case "$severity" in
+    HIGH)   snd="Notification.Reminder" ;;
+    MEDIUM) snd="Notification.SMS" ;;
+    LOW)    snd="Notification.Default" ;;
+    *)      snd="Notification.SMS" ;;
+  esac
+
+  WST_TITLE="$(_notify_strip_ctl "$title"  | cut -c1-200)" \
+  WST_SUB="$(_notify_strip_ctl "$subtitle" | cut -c1-200)" \
+  WST_BODY="$(_notify_strip_ctl "$message" | cut -c1-400)" \
+  WST_SOUND="$snd" \
+  powershell.exe -NoProfile -NonInteractive -WindowStyle Hidden -Command '
+$ErrorActionPreference = "Stop"
+try {
+  function X($s) {
+    if ($null -eq $s) { return "" }
+    $sb = New-Object System.Text.StringBuilder
+    foreach ($ch in $s.ToCharArray()) {
+      $c = [int]$ch
+      if ($c -ge 32 -and $c -ne 127 -and ($c -lt 55296 -or $c -gt 57343) -and $c -ne 65534 -and $c -ne 65535) {
+        [void]$sb.Append($ch)
+      }
+    }
+    return [System.Security.SecurityElement]::Escape($sb.ToString())
+  }
+  $t = X $env:WST_TITLE; $sub = X $env:WST_SUB; $b = X $env:WST_BODY
+  $snd = $env:WST_SOUND
+  $audio = "<audio src=`"ms-winsoundevent:$snd`"/>"
+  $subLine = if ([string]::IsNullOrEmpty($sub)) { "" } else { "<text>$sub</text>" }
+  $xml = "<toast><visual><binding template=`"ToastGeneric`"><text>$t</text>$subLine<text>$b</text></binding></visual>$audio</toast>"
+  $AppId = "{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\WindowsPowerShell\v1.0\powershell.exe"
+  $doc = [Windows.Data.Xml.Dom.XmlDocument,Windows.Data.Xml.Dom.XmlDocument,ContentType=WindowsRuntime]::New()
+  $doc.LoadXml($xml)
+  [Windows.UI.Notifications.ToastNotificationManager,Windows.UI.Notifications,ContentType=WindowsRuntime]::CreateToastNotifier($AppId).Show($doc)
+} catch { }
+' >/dev/null 2>&1 || true
+}
 
 # notify_dispatch <severity> <title> <message> [subtitle] [macos_sound]
 # severity ∈ {HIGH,MEDIUM,LOW}. Routes to the per-OS sender. ALWAYS returns 0 and
@@ -135,7 +195,7 @@ notify_dispatch() {
     linux)   _notify_linux "$severity" "$title" "$message" "$subtitle" ;;
     wsl)
       # Prefer the in-distro daemon when a display is reachable (WSLg), else the
-      # Windows toast path via powershell.exe interop (PR #2).
+      # Windows toast path via powershell.exe interop.
       if command -v notify-send >/dev/null 2>&1 && { [ -n "${WAYLAND_DISPLAY:-}" ] || [ -n "${DISPLAY:-}" ]; }; then
         _notify_linux "$severity" "$title" "$message" "$subtitle"
       else
