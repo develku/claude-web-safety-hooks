@@ -41,6 +41,11 @@ LIB="$(cd "$(dirname "$0")" && pwd)/web-safety-lib.sh"
 # shellcheck source=/dev/null
 [ -f "$LIB" ] && . "$LIB"
 
+# Cross-platform notification dispatcher (notify_dispatch). Sibling file.
+NOTIFY_LIB="$(cd "$(dirname "$0")" && pwd)/web-safety-notify.sh"
+# shellcheck source=/dev/null
+[ -f "$NOTIFY_LIB" ] && . "$NOTIFY_LIB"
+
 # Session key MUST be computed identically to the scanner's writer key
 # (${CLAUDE_SESSION_ID:-$PPID}) — a mismatch would silently disarm the guard.
 SESSION_ID="${CLAUDE_SESSION_ID:-$PPID}"
@@ -66,15 +71,14 @@ host_allowlisted() {
 
 # emit_ask <reason> <log-tag> <log-detail> — log + notify + emit ASK json, exit 0.
 emit_ask() {
-  local reason="$1" tag="$2" detail safe notify
+  local reason="$1" tag="$2" detail safe
   detail="$3"
   mkdir -p "$CONFIG_DIR" 2>/dev/null
   # Strip control chars (C0+DEL) and truncate before logging (log-injection safe).
   safe=$(printf '%s' "$detail" | tr -d '\000-\037\177' | cut -c1-200)
   echo "[$(date '+%Y-%m-%d %H:%M:%S')] [${tag}] session=${SESSION_ID} ${safe}" >> "$LOG_FILE" 2>/dev/null
-  # Strip AppleScript metacharacters (" and \) before embedding in the notify.
-  notify=$(printf '%s' "$safe" | tr -d '"\\')
-  osascript -e "display notification \"${notify}\" with title \"🛡️ Exfiltration Guard\" subtitle \"Outbound activity after flagged injection\" sound name \"Sosumi\"" >/dev/null 2>&1 &
+  # Cross-platform notify (dispatcher applies the per-platform metachar escaping).
+  notify_dispatch "MEDIUM" "🛡️ Exfiltration Guard" "$safe" "Outbound activity after flagged injection" "Sosumi"
   jq -n --arg r "$reason" '{
     hookSpecificOutput: {
       hookEventName: "PreToolUse",

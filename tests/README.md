@@ -30,3 +30,5 @@ These are public attack samples (the same patterns are documented in [docs/patte
 ## Isolation guarantees
 
 Each test runs with a fresh `WEB_SAFETY_CONFIG_DIR` (so logs don't bleed across cases) and wipes `/tmp/web-safety-session-state` (so the 5-minute cross-tool escalation window doesn't poison later tests). `osascript` is stubbed via `PATH` so macOS notifications stay quiet during the run.
+
+The cross-platform notification dispatcher has its own suite, [run-notify-tests.sh](run-notify-tests.sh), which stubs `uname` (to drive platform detection deterministically on any host) plus `notify-send`/`osascript`/sound players via `PATH`, so it exercises the macOS and Linux paths identically on both CI legs without firing a real notification.

@@ -49,3 +49,6 @@ jobs:
 
       - name: Run egress guard test suite
         run: ./tests/run-egress-tests.sh
+
+      - name: Run notification dispatcher test suite
+        run: ./tests/run-notify-tests.sh

@@ -90,7 +90,7 @@ The PreToolUse and PostToolUse matchers should always be kept in sync — one wi
 
 ## Notification rate limiting
 
-Default: 5 seconds between macOS notifications (debounce). Adjust `RATE_LIMIT_SECONDS` near the top of `scripts/web-safety-scanner.sh`.
+Default: 5 seconds between scanner notifications (debounce), on every platform. Adjust `RATE_LIMIT_SECONDS` near the top of `scripts/web-safety-scanner.sh`. (The PreToolUse URL pre-block and exfiltration-guard notifications are not rate-limited — they fire only on a hard block / armed-egress event.)
 
 ## Audit log
 
@@ -180,6 +180,6 @@ This is **not bulletproof**. Be aware:
 - **Evasion views are additive** — each new normalisation view adds coverage but also increases the surface for false positives on security-focused content.
 - **Invisible-character precision has residuals** — the emoji false-positive pass (v7.8.0) tightened the variation-selector (run ≥2), zero-width (ASCII-adjacency), and tag-char (exact subdivision-flag whitelist) predicates so legitimate emoji no longer trip them. Two notify-only smuggle residuals remain, tracked as View-4 normalizer TODOs: interleaved-carrier variation selectors, and zero-widths placed between two non-ASCII homoglyphs.
 - **Not a substitute for human review** — the permission system (you approving tool calls) remains the strongest protection.
-- **macOS-only notifications** — desktop notifications use `osascript`; the scanner works cross-platform without them.
+- **Desktop notifications cover macOS + Linux** — `web-safety-notify.sh` dispatches to macOS `osascript` or Linux `notify-send` (best-effort sound via `canberra-gtk-play`/`paplay`/`pw-play`); on a headless/SSH/no-DBUS session, or any other platform, the notification is a silent no-op while detection still runs. Windows toast support is planned. Detection never depends on the notifier.
 
 This is one layer in a defense-in-depth strategy. It significantly raises the bar for injection attacks but does not eliminate the risk.
