@@ -2,6 +2,52 @@
 
 All notable changes to this project. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [7.11.0] — 2026-06-07
+
+Per-source **content-trust downgrade**. Targets the most common irreducible false
+positive: a security article that *quotes* an attack string (`ignore previous
+instructions`, `<|im_start|>`) in prose, which pattern-matching cannot tell apart
+from a live attack. For a host you curate, the scanner keeps **detecting** but
+**downgrades the action** — it does not halt Claude and does not redact — so you
+can actually read the quoted strings, while the Layer 6 exfiltration guard remains
+the safety backstop.
+
+### Added
+
+- **`url-content-trust.txt`** (new user-state file in `$WEB_SAFETY_CONFIG_DIR`,
+  suffix-matched like the allowlist) and **`/web-safety-trust <domain>`** slash
+  command (backed by `web-safety-listctl.sh trust`). On a content-trusted host the
+  scanner: does **not** halt, does **not** redact (original content passes
+  through), still writes a `[TRUST-DOWNGRADE]` audit line (auto-surfaced by
+  `/web-safety-report`), still **arms the Layer 6 exfiltration guard**, and fires a
+  non-blocking notification when it passes would-be-redacted patterns through.
+- **`run-trust-tests.sh`** — new suite, 21 cases (scanner downgrade contract +
+  subdomain match + non-exemption of other hosts + clean-content no-op +
+  escalation-non-pollution + `listctl trust` validation). Wired into the CI matrix.
+
+### Security
+
+- **Distinct from `url-allowlist.txt` by design.** The allowlist relaxes only the
+  soft URL pre-blocks and never touches the content scan; content-trust changes
+  only the content-scan *action* and never relaxes a URL block. **Hard URL blocks**
+  (SSRF/internal targets, direct IPs, dangerous schemes, credentials-in-URL) always
+  apply regardless of either list.
+- **Downgrade does not feed cross-tool escalation** — `emit_trust_downgrade` runs
+  *before* `record_session_hit`, so a trusted source's quoted attack strings can't
+  inflate the Layer 4 escalation counter and trip HIGH on unrelated untrusted tools.
+- **Fail-safe matching** — a missing host library, an absent URL, or a
+  parser-desync authority (`ws-invalid-authority`) all resolve to "not trusted", so
+  the default protective (halt + redact) path runs on any ambiguity.
+- **Stated trade-off:** the retained safety on a trusted source is the egress
+  confirmation, not redaction — a compromised content-trusted domain passes its
+  injection content through unredacted. Documented in `docs/tuning.md`; audit
+  `[TRUST-DOWNGRADE]` events via `/web-safety-report`.
+
+### Changed
+
+- `web-safety-scanner.sh` now sources `web-safety-lib.sh` (for `normalize_host` /
+  `host_in_list`), mirroring the existing notify-lib sourcing pattern.
+
 ## [7.10.0] — 2026-06-04
 
 Cross-platform desktop notifications (part 2 of 2: Windows). Completes v7.9.0 by

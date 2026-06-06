@@ -53,6 +53,9 @@ jobs:
       - name: Run notification dispatcher test suite
         run: ./tests/run-notify-tests.sh
 
+      - name: Run content-trust downgrade test suite
+        run: ./tests/run-trust-tests.sh
+
       - name: Validate embedded Windows toast PowerShell (pwsh parser)
         # No Windows runner exists, so the WinRT toast can't run here — but the
         # runner-provided pwsh can parse-check the embedded script for SYNTAX

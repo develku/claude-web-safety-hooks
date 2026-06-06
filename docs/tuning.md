@@ -49,21 +49,45 @@ malware-distribution.example.com
 known-injection-host.example.net
 ```
 
+## URL content-trust list
+
+`$WEB_SAFETY_CONFIG_DIR/url-content-trust.txt` — one domain per line, same comment/blank-line format as the allowlist, **suffix-matched** (`example.com` covers `docs.example.com`).
+
+This is the answer to the most common false positive: a security article that *quotes* an attack string (`ignore previous instructions`, `<|im_start|>`) in prose, which pattern-matching cannot tell apart from a real attack. For a host on this list the scanner still **detects**, but **downgrades the action**:
+
+- does **not** halt Claude,
+- does **not** redact — the original content passes through, so you can actually read the quoted attack strings,
+- still writes a `[TRUST-DOWNGRADE]` line to the audit log (visible in `/web-safety-report`),
+- still **arms the Layer 6 exfiltration guard** as a backstop, and
+- fires a non-blocking desktop notification when it lets would-be-redacted patterns through.
+
+```
+# security blogs I read for research — quoted attack strings are descriptive
+blog.cyberdesserts.com
+embracethered.com
+```
+
+**This is not the allowlist.** `url-allowlist.txt` only relaxes the *soft URL pre-blocks* (high-risk TLD + custom blocklist) and never touches the content scan; `url-content-trust.txt` only changes the *content-scan action* and never relaxes a URL block. **Hard URL blocks** (SSRF/internal targets, direct IPs, dangerous schemes, credentials-in-URL) always apply regardless of either list.
+
+**Trade-off:** the safety you keep on a content-trusted source is the Layer 6 egress confirmation, not redaction — a content-trusted domain that is compromised will have its injection content passed through unredacted. Only add sources you genuinely curate, and audit `[TRUST-DOWNGRADE]` events periodically via `/web-safety-report`.
+
 ## Slash commands
 
-The plugin ships three commands, auto-discovered when installed:
+The plugin ships four commands, auto-discovered when installed:
 
 | Command | What it does |
 |---|---|
 | `/web-safety-report [days]` | Markdown summary of the audit log — counts by severity, top tools, top hosts, recent events. Optional `[days]` limits the window (e.g. `/web-safety-report 7`). Read-only; never mutates the log. |
 | `/web-safety-allow <domain>` | Validate and append a domain to the allowlist above. Idempotent. |
 | `/web-safety-block <domain>` | Validate and append a domain to the blocklist above. Idempotent. |
+| `/web-safety-trust <domain>` | Validate and append a domain to the content-trust list above — downgrades the content scan (no halt, no redaction) for that source while keeping the audit log + Layer 6 backstop. Idempotent. |
 
-`allow` / `block` accept a bare domain or a full URL (reduced to its host) and reject anything that isn't a valid hostname — so a malformed or shell-metacharacter entry can never reach the files the pre-screening hook reads. The underlying helpers (`scripts/web-safety-report.sh`, `scripts/web-safety-listctl.sh`) also run standalone if you prefer the CLI:
+`allow` / `block` / `trust` accept a bare domain or a full URL (reduced to its host) and reject anything that isn't a valid hostname — so a malformed or shell-metacharacter entry can never reach the files the hooks read. The underlying helpers (`scripts/web-safety-report.sh`, `scripts/web-safety-listctl.sh`) also run standalone if you prefer the CLI:
 
 ```bash
 scripts/web-safety-report.sh 7
 scripts/web-safety-listctl.sh allow github.com
+scripts/web-safety-listctl.sh trust blog.cyberdesserts.com
 ```
 
 ## Adding patterns
@@ -104,6 +128,7 @@ Default: 5 seconds between scanner notifications (debounce), on every platform. 
 [2026-03-23 14:32:00] [PRE-BLOCK] url=data:text/html;base64,... reason=dangerous URI scheme
 [2026-03-23 14:33:00] [CLEARED] tool=WebFetch url=https://github.com/... pattern="assistant: " reason="inside code_fence" hash=8360aceb695f
 [2026-03-23 14:34:00] [SCANNER-ERROR] grep failed severity=MEDIUM view=collapsed exit=2 err="grep: ..."
+[2026-03-23 14:35:00] [TRUST-DOWNGRADE] tool=WebFetch url=https://blog.example.com/... would_be=HIGH host=blog.example.com patterns="<|im_start|>"
 ```
 
 Entry types:
@@ -111,6 +136,7 @@ Entry types:
 - `[SANITIZE]` — content was rewritten; includes SHA-256 of the original for forensic chain-of-custody
 - `[PRE-BLOCK]` — URL pre-screening rejected the URL before fetching
 - `[CLEARED]` — Layer 5 verifier auto-cleared a false positive (does NOT count toward escalation)
+- `[TRUST-DOWNGRADE]` — the host is on `url-content-trust.txt`, so a `would_be` HIGH/MEDIUM was passed through unredacted (not halted); Layer 6 was still armed. Does NOT count toward escalation. Audit these to confirm your trust list isn't masking a real attack.
 - `[SCANNER-ERROR]` — internal error (malformed pattern, system issue); the scanner fails-closed and surfaces a synthetic HIGH-severity hit so the user is alerted
 
 ## False-positive workflow
@@ -119,8 +145,9 @@ If the scanner pauses you on legitimate content:
 
 1. Check the audit log — note the matched pattern.
 2. **If the pattern is in `MED_GENERIC_DELIMITERS`** (`assistant:`, `human:`, `<system>`, `[INST]`, `system: you are`) — confirm Layer 5 is enabled (`VERIFY_CONTEXT_ENABLED=true`). If the content is inside a code fence / YAML string / JSON value / HTML code block but you're still being paused, the verifier may be missing a structural pattern — file an issue with a minimal reproducer.
-3. **If the URL host is consistently trusted** — add it to the allowlist (covers soft blocks only; doesn't suppress content-scan hits).
-4. **If a specific pattern is over-firing** — open `scripts/web-safety-scanner.sh`, find the pattern in its severity array, and either remove it or move it to a lower-severity array. Add a `legit-*` payload to `tests/payloads/` capturing the false-positive context so regression tests guard against re-adding it.
+3. **If it's a security article quoting attack strings in prose** (the most common irreducible false positive — pattern-matching can't tell description from execution) — add the host to the content-trust list: `/web-safety-trust <domain>`. The scanner then passes that source through unredacted (no halt) while keeping the audit log + Layer 6 backstop. See "URL content-trust list" above.
+4. **If the URL host is consistently trusted for soft blocks** — add it to the allowlist (relaxes the soft URL pre-blocks only; does *not* suppress content-scan hits — use content-trust for those).
+5. **If a specific pattern is over-firing** — open `scripts/web-safety-scanner.sh`, find the pattern in its severity array, and either remove it or move it to a lower-severity array. Add a `legit-*` payload to `tests/payloads/` capturing the false-positive context so regression tests guard against re-adding it.
 
 ## Cross-tool escalation + reassembly tuning
 
