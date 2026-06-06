@@ -2,9 +2,10 @@
 # web-safety-listctl.sh — add a validated domain to the URL allowlist or blocklist
 # consumed by the PreToolUse pre-screening hook (web-safety-approve.sh).
 #
-# Usage: web-safety-listctl.sh <allow|block> <domain>
+# Usage: web-safety-listctl.sh <allow|block|trust> <domain>
 #   allow  -> $WEB_SAFETY_CONFIG_DIR/url-allowlist.txt
 #   block  -> $WEB_SAFETY_CONFIG_DIR/url-blocklist.txt
+#   trust  -> $WEB_SAFETY_CONFIG_DIR/url-content-trust.txt
 #
 # The domain is normalized (a pasted URL is reduced to its host) and strictly
 # validated before any write — these files gate a security control, so a
@@ -19,7 +20,8 @@ DOMAIN="${2:-}"
 case "$LIST" in
   allow) FILE="$CONFIG_DIR/url-allowlist.txt" ;;
   block) FILE="$CONFIG_DIR/url-blocklist.txt" ;;
-  *) echo "usage: web-safety-listctl.sh <allow|block> <domain>" >&2; exit 2 ;;
+  trust) FILE="$CONFIG_DIR/url-content-trust.txt" ;;
+  *) echo "usage: web-safety-listctl.sh <allow|block|trust> <domain>" >&2; exit 2 ;;
 esac
 
 if [ -z "$DOMAIN" ]; then

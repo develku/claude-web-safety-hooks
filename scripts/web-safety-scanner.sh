@@ -71,6 +71,13 @@ NOTIFY_LIB="$HOOKS_DIR/web-safety-notify.sh"
 # shellcheck source=/dev/null
 [ -f "$NOTIFY_LIB" ] && . "$NOTIFY_LIB"
 
+# Shared host-normalization + list matching (normalize_host, host_in_list),
+# reused by the content-trust downgrade. Same sibling-resolution pattern as
+# NOTIFY_LIB; side-effect-free, defines functions only.
+SAFETY_LIB="$HOOKS_DIR/web-safety-lib.sh"
+# shellcheck source=/dev/null
+[ -f "$SAFETY_LIB" ] && . "$SAFETY_LIB"
+
 # CONFIG_DIR — user-state (log, blocklist, allowlist). Persists across plugin
 # updates. Override with WEB_SAFETY_CONFIG_DIR. Defaults to ~/.claude/hooks.
 CONFIG_DIR="${WEB_SAFETY_CONFIG_DIR:-$HOME/.claude/hooks}"
@@ -145,6 +152,25 @@ record_session_hit() {
 # HIGH never arms another's egress.
 arm_egress_guard() {
   echo "$(date +%s)" > "/tmp/web-safety-session-${SESSION_ID}-armed" 2>/dev/null
+}
+
+# Content-trust: a per-source downgrade list ($CONFIG_DIR/url-content-trust.txt,
+# suffix-matched like the allowlist). For a host on this list the scanner keeps
+# DETECTING but changes its ACTION — it does not halt and does not redact, yet
+# still logs [TRUST-DOWNGRADE] and arms Layer 6. This lets the operator read
+# security articles that quote attack strings without the scanner deleting the
+# very content they fetched, while the egress guard stays the safety backstop.
+# Distinct from url-allowlist.txt (which only relaxes the soft URL pre-blocks and
+# never touches the content scan). Fail-safe: if the lib is missing or the URL is
+# absent/hostile, returns 1 (not trusted) so the default protective path runs.
+CONTENT_TRUST_FILE="$CONFIG_DIR/url-content-trust.txt"
+host_is_content_trusted() {
+  [ -n "$TOOL_URL" ] || return 1
+  command -v normalize_host >/dev/null 2>&1 || return 1
+  local h
+  h=$(normalize_host "$TOOL_URL")
+  [ "$h" = "ws-invalid-authority" ] && return 1
+  host_in_list "$h" "$CONTENT_TRUST_FILE"
 }
 
 # Collect prior flagged tools for escalation context (H entries only)
@@ -1525,6 +1551,23 @@ send_notification() {
   notify_dispatch "$severity" "$title" "$message" "$subtitle" "$sound"
 }
 
+# Content-trust downgrade: emit a non-halting, non-redacting result for a
+# HIGH/MEDIUM/ESCALATED detection on a content-trusted host. Keeps the safety net
+# (audit log + armed Layer 6 + a non-blocking notification) but passes the
+# ORIGINAL content through so the operator can actually read it. Deliberately
+# does NOT call record_session_hit, so a trusted source's quoted attack strings
+# never feed cross-tool escalation. Exits the script.
+emit_trust_downgrade() {
+  local would_be="$1" patterns="$2" host
+  host=$(normalize_host "$TOOL_URL")
+  echo "[$(date '+%Y-%m-%d %H:%M:%S')] [TRUST-DOWNGRADE] tool=${TOOL_NAME} ${TOOL_URL:+url=${TOOL_URL} }would_be=${would_be} host=${host} patterns=${patterns}" >> "$LOG_FILE"
+  arm_egress_guard
+  send_notification "LOW" "🔓 Web Safety: trusted-source bypass [${TOOL_NAME}]" "Passed ${would_be} patterns unredacted: ${patterns//\"/}" "Ping" "${host}"
+  local msg="WEB SAFETY [trusted-source downgrade]: ${would_be}-severity patterns detected, but ${host} is on your content-trust list — the content was passed through UNREDACTED and Claude was NOT halted. Patterns: [${patterns}]. The Layer 6 exfiltration guard has been armed as a backstop, so any outbound data flow will still require your confirmation. Treat the content with appropriate caution."
+  jq -n --arg msg "$msg" '{"systemMessage": $msg}'
+  exit 0
+}
+
 # =============================================================================
 # Content sanitization: redact injection lines from tool output
 # =============================================================================
@@ -1920,6 +1963,12 @@ fi
 if [ ${#UNIQUE_HIGH[@]} -gt 0 ]; then
   HIGH_LIST=$(format_list "${UNIQUE_HIGH[@]}")
 
+  # Content-trust: on a trusted source, downgrade (no halt, no redaction) before
+  # recording a hit, arming-only as the backstop. Exits.
+  if host_is_content_trusted; then
+    emit_trust_downgrade "HIGH" "$HIGH_LIST"
+  fi
+
   # Extract content snippets that triggered the match
   ALL_PATTERNS=("${UNIQUE_HIGH[@]}")
   [ ${#UNIQUE_MED[@]} -gt 0 ] && ALL_PATTERNS+=("${UNIQUE_MED[@]}")
@@ -1976,8 +2025,15 @@ REASON
 
 # --- MEDIUM SEVERITY: Pause for user confirmation ---
 elif [ ${#UNIQUE_MED[@]} -gt 0 ]; then
-  record_session_hit
   MED_LIST=$(format_list "${UNIQUE_MED[@]}")
+
+  # Content-trust: downgrade before recording a hit, so a trusted source's quoted
+  # attack strings neither halt Claude nor feed cross-tool escalation. Exits.
+  if host_is_content_trusted; then
+    emit_trust_downgrade "MEDIUM" "$MED_LIST"
+  fi
+
+  record_session_hit
 
   # Cross-tool escalation: if 3+ hits in 5 min window, treat as HIGH
   if [ "$ESCALATE_TO_HIGH" = "true" ]; then
