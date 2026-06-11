@@ -40,7 +40,7 @@ environments (stdin `.session_id` is the reliable key).
   honors `stop_hook_active` and advances a per-session epoch marker *before*
   emitting the block. Any script error exits 0 — advisory layer, never traps the
   session.
-- **`run-agent-tests.sh`** — new suite, 19 cases (now 6 suites · 234 cases): kill
+- **`run-agent-tests.sh`** — new suite, 19 cases (now 6 suites · 255 cases): kill
   ledger + arming producers, byte-identical main-session path, per-agent vs
   session escalation scoping, parallel atomic-recount, attribution join/freshness/
   session filters, Stop-gate one-shot contracts, hooks.json wiring.
@@ -64,6 +64,50 @@ environments (stdin `.session_id` is the reliable key).
   the same mkdir-lock critical section** (bounded ~1s spin, stale-lock breaker,
   unlocked-append last resort so the 10s hook budget is never at risk), and the
   MEDIUM branch decides on that post-append count.
+
+## [7.12.0] — 2026-06-08
+
+Layer 6 **mode-aware enforcement** + two new exfil channels. Fixes a silent gap:
+the guard escalated via `permissionDecision:"ask"`, which the harness **discards**
+in `bypassPermissions`/`auto`/`dontAsk` modes — so for anyone running
+permission-skip, Layer 6 *detected and logged but never actually blocked* an exfil
+(verified empirically: an armed `curl` to a non-allowlisted host emitted the
+`[EGRESS-ASK]` log line yet still ran). The guard now reads the hook's
+`permission_mode` and routes its decision accordingly.
+
+### Added
+
+- **DNS-tunneling channel** — `dig`, `nslookup`, `drill`, `kdig` (data smuggled in
+  subdomain labels, read from the attacker's authoritative-NS query log; bypasses
+  every HTTP-shaped check). `host` deliberately excluded (FP risk).
+- **`git push` channel** — `git push`, incl. `git -c k=v push` / `git -C path push`
+  (ships repo contents/secrets to a remote). A push to an allowlisted remote host
+  stays exempt; `git commit -m "…push…"` and `git pull` do not match.
+- Egress suite → **92 cases** (+14: mode-aware routing across all six
+  `permission_mode` values, DNS + git-push detection, allowlist exemption, and
+  false-positive guards). Five suites · **236 cases**.
+
+### Changed
+
+- **`emit_ask` → `emit_guard` (mode-aware).** Ask-honoring modes
+  (`default`/`acceptEdits`/`plan`, or an older harness that omits `permission_mode`)
+  still get `permissionDecision:"ask"` — no behavior change. Ask-discarding modes
+  (`bypassPermissions`/`auto`/`dontAsk`) now get a hard `{decision:"block"}`, the
+  legacy PreToolUse block form the Layer 1 URL pre-screen already uses and which
+  bypass mode honors (whereas it discards `permissionDecision`). Escape a wrong
+  block via `url-allowlist.txt` or `WEB_SAFETY_EGRESS_GUARD_DISABLE=1`.
+
+### Security
+
+- **Closes the "inert guard in permission-skip mode" hole.** A user running with
+  permissions bypassed had no effective Layer 6 — the primary inject→exfil defense.
+  It now enforces in exactly those modes, where enforcement matters most.
+- DNS tunnels and `git push` were both previously listed as documented evasion gaps
+  in `docs/patterns.md`; they are now covered (the limitations note is updated to
+  the remaining residuals: base64/var-indirection, cloud-storage CLIs,
+  package-manager fetch/publish, non-standard resolver binaries, raw `/dev/udp/…/53`).
+- Still a careless-injected-agent speed-bump, not adversarial-proof: `c""url`-style
+  token splitting and base64-decoded commands remain out of scope by design.
 
 ## [7.11.0] — 2026-06-07
 
