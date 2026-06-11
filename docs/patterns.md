@@ -9,7 +9,9 @@ The scanner classifies content into **HIGH**, **MEDIUM**, and **LOW** severity. 
 | **HIGH** | Stop — Claude halts, content fully redacted | Basso | LLM control tokens, tool-call faking, tracking pixels, base64 attacks, Unicode tag chars |
 | **MEDIUM** | Pause — Claude asks user, lines surgically redacted | Sosumi | Instruction override, jailbreaks, social engineering, role manipulation, etc. |
 | **LOW** | Note — mild note, Claude continues | Ping | HTML/CSS hiding, common markdown images, zero-width chars |
-| **ESCALATED** | Stop — auto-escalated from MEDIUM | Basso | 3+ tools flagged in 5-min window |
+| **ESCALATED** | Stop — auto-escalated from MEDIUM | Basso | 3+ flagged calls in a 5-min window — counted **per agent** since v8 (no `agent_id` = whole-session, the v7 behavior) |
+
+**Inside a subagent** (hook input carries `agent_id`), a HIGH/MEDIUM/ESCALATED stop kills that subagent — its `stopReason` has no reader and the orchestrator would only see an empty result. Since v8 the verdict is unchanged (the kill IS the containment) but never silent: the scanner first writes a `[PENDING-KILLED]` k=v row to `web-safety.log` and arms the Layer 6 egress guard; the parent session's `web-safety-agent-result.sh` then explains the death next to the resolving Agent call, and `web-safety-stop-gate.sh` blocks the turn's end once until the user has been told (details surface in `/web-safety-report`). Main-session verdicts are untouched — the interactive stopReason review is the acknowledgment there.
 
 ## HIGH severity
 
