@@ -35,6 +35,27 @@
             "timeout": 10000
           }
         ]
+      },
+      {
+        "matcher": "Task|Agent",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/scripts/web-safety-agent-result.sh",
+            "timeout": 5000
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/scripts/web-safety-stop-gate.sh",
+            "timeout": 5000
+          }
+        ]
       }
     ]
   }

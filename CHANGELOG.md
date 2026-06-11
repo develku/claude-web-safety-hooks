@@ -2,6 +2,69 @@
 
 All notable changes to this project. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [8.0.0] — 2026-06-11
+
+**Layer 7: multi-agent visibility** — die-but-visible. Fixes a real incident: during
+an orchestrated multi-agent run, several web-searching subagents vanished. Root
+cause: the scanner's MEDIUM/ESCALATED verdict emits `"continue": false`, which in
+the **main session** is a human review checkpoint (the user reads the `stopReason`
+and types to continue) but inside a **Task/Agent subagent** kills that agent — the
+`stopReason` has no reader there, the orchestrator receives `status:"completed"`
+with empty `content`, and the only other signal is a desktop toast that evaporates
+in seconds. Design selected via a two-round adversarial assessment (15 candidate
+designs, 3-judge panel): the kill **stays** — capability-zero containment, robust
+to any harness version skew — but is never silent again. Verified by live probe on
+CLI 2.1.169: `agent_id`/`agent_type` present in subagent hook stdin,
+`tool_response.agentId` join-key equality, Stop `decision:"block"` functional,
+`stop_hook_active` loop guard, and `CLAUDE_SESSION_ID` **absent** from hook
+environments (stdin `.session_id` is the reliable key).
+
+### Added
+
+- **Kill ledger.** Immediately before a subagent halt (MEDIUM, ESCALATED, and
+  HIGH-stop), the scanner appends a `[PENDING-KILLED]` k=v row
+  (`epoch= session= agent= severity= tool= url= patterns=`) to `web-safety.log` —
+  auto-surfaced by `/web-safety-report` — and **arms the Layer 6 egress guard**
+  (previously only HIGH armed it). Keyed by stdin `.session_id` + `.agent_id`
+  (strictly whitelist-sanitized: they flow into paths and the log).
+- **`web-safety-agent-result.sh`** — new PostToolUse hook on `Task|Agent` in the
+  parent session. Joins fresh ledger rows to the resolving Agent call via
+  `tool_response.agentId` (session- and freshness-filtered) and injects factual
+  `additionalContext` next to the empty result: which agent died, severity, tool,
+  host, and that re-dispatch should exclude the flagged source. Relays
+  severity/tool/host only — pattern labels and full URLs (which can embed attacker
+  text) never reach model-facing output. Silent fast exit on every other path.
+- **`web-safety-stop-gate.sh`** — new Stop hook (main session). If unsurfaced kill
+  rows exist for this session, blocks Stop **once** with a summary instructing
+  Claude to tell the user and point at `/web-safety-report`. One-shot twice over:
+  honors `stop_hook_active` and advances a per-session epoch marker *before*
+  emitting the block. Any script error exits 0 — advisory layer, never traps the
+  session.
+- **`run-agent-tests.sh`** — new suite, 19 cases (now 6 suites · 234 cases): kill
+  ledger + arming producers, byte-identical main-session path, per-agent vs
+  session escalation scoping, parallel atomic-recount, attribution join/freshness/
+  session filters, Stop-gate one-shot contracts, hooks.json wiring.
+
+### Changed
+
+- **Per-agent escalation scoping.** With `agent_id` present, strikes land in
+  `/tmp/web-safety-session-<sid>-agent-<aid>-state` and the 3-in-300s window
+  counts **that agent's** hits — parallel fan-out FP noise from independent
+  subagents no longer pools into a fleet-killing ESCALATED. Without `agent_id`
+  the v7 session-wide file and semantics are unchanged. The E8 fragment store
+  deliberately stays session-wide (split-payload reassembly is cross-agent
+  content evidence).
+
+### Fixed
+
+- **Escalation counter race.** The escalate decision used a hit count read at
+  script start, so N parallel scanners all saw the same stale value and *none*
+  escalated — the "3 strikes" bound did not hold under exactly the fan-out
+  workload it targets. `record_session_hit` now appends **and recounts inside
+  the same mkdir-lock critical section** (bounded ~1s spin, stale-lock breaker,
+  unlocked-append last resort so the 10s hook budget is never at risk), and the
+  MEDIUM branch decides on that post-append count.
+
 ## [7.11.0] — 2026-06-07
 
 Per-source **content-trust downgrade**. Targets the most common irreducible false

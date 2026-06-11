@@ -14,7 +14,7 @@ When Claude Code fetches web pages or searches the web, the returned content cou
 
 ## How it works
 
-Six layers, each documented in [docs/patterns.md](docs/patterns.md):
+Seven layers, each documented in [docs/patterns.md](docs/patterns.md):
 
 | Layer | When | What |
 |---|---|---|
@@ -24,6 +24,7 @@ Six layers, each documented in [docs/patterns.md](docs/patterns.md):
 | **4. Cross-tool correlation + reassembly** | PostToolUse | 5-min window; 3+ flagged tools auto-escalate MEDIUM → HIGH. **v6.0+ also detects payloads split across multiple fetches** (`Part 1/3: ignore` + `Part 2/3: previous` + `Part 3/3: instructions` → reassembled match) |
 | **5. Structural verification** | PostToolUse | Code-fence / YAML / JSON / HTML-code / inline-code aware — clears false positives like `assistant:` inside doc snippets without bothering the user |
 | **6. Outbound exfiltration guard** | PreToolUse (Bash + web-fetch) | When a HIGH injection was flagged in this session in the last 5 min, escalates outbound data flows to a user confirmation — breaking the inject→exfil chain. Covers network-egress Bash commands (`curl`/`wget`/`scp`/`rsync`/`ssh`/`nc`/`socat`/`/dev/tcp`/inline `python -c`/`node -e`) **and** web-fetch tools (a fetch to a non-allowlisted host while armed — the most natural post-injection exfil). Trusted destinations via `url-allowlist.txt`, but an *upload* to an allowlisted host is not exempted; kill switch `WEB_SAFETY_EGRESS_GUARD_DISABLE=1` |
+| **7. Multi-agent visibility** | PostToolUse (Agent) + Stop | A scanner halt **inside a subagent** kills that agent silently — the orchestrator sees an empty result, the toast evaporates. v8 writes every subagent kill to a `[PENDING-KILLED]` ledger row first, arms Layer 6, then explains the death twice: factual context injected next to the resolving Agent call, and a one-shot Stop gate that makes Claude tell the user before the turn ends. Escalation strikes are scoped **per agent**, so parallel fan-out FP noise no longer mass-kills the fleet |
 
 ## Architecture
 
@@ -36,11 +37,13 @@ web-safety/
 │   ├── web-safety-approve.sh         # Layer 1   — PreToolUse(web)  URL pre-screen
 │   ├── web-safety-scanner.sh         # Layers 2–5 — PostToolUse(web) scan + sanitize; arms Layer 6
 │   ├── web-safety-egress.sh          # Layer 6   — PreToolUse(Bash) outbound exfiltration guard
+│   ├── web-safety-agent-result.sh    # Layer 7   — PostToolUse(Agent) subagent-kill attribution
+│   ├── web-safety-stop-gate.sh       # Layer 7   — Stop one-shot kill surfacing
 │   ├── web-safety-verify-context.sh  # Layer 5   — structural-verification helper
 │   ├── web-safety-listctl.sh         # backs /web-safety-allow + /web-safety-block
 │   └── web-safety-report.sh          # backs /web-safety-report
 ├── commands/                         # 4 user-invoked slash commands (auto-discovered)
-├── tests/                            # 5 suites · 215 cases · Linux+macOS CI
+├── tests/                            # 6 suites · 234 cases · Linux+macOS CI
 └── docs/                             # patterns.md, tuning.md, design specs
 ```
 
@@ -51,6 +54,8 @@ web-safety/
 | **PreToolUse** | `WebFetch` / `WebSearch` / MCP web tools | `web-safety-approve.sh` → `web-safety-egress.sh` | 1, 6 |
 | **PreToolUse** | `Bash` | `web-safety-egress.sh` | 6 |
 | **PostToolUse** | `WebFetch` / `WebSearch` / MCP web tools | `web-safety-scanner.sh` (10s timeout) | 2–5 (+ arms 6) |
+| **PostToolUse** | `Task` / `Agent` | `web-safety-agent-result.sh` (5s timeout) | 7 |
+| **Stop** | — | `web-safety-stop-gate.sh` (5s timeout) | 7 |
 
 Layer 6 runs on the web matcher as well as `Bash` (since v7.5.0): while armed, an outbound fetch to a non-allowlisted host is escalated just like a Bash egress command.
 
@@ -67,13 +72,21 @@ Hooks are short-lived processes with no shared memory, so cross-step state lives
                                                           ▼  PostToolUse(web)
                             [Layers 2–5] scanner.sh ── scan · sanitize · correlate
                                    │ writes
-                                   ├─► /tmp/web-safety-session-<id>-state      (hit log → Layer 4 escalation)
+                                   ├─► /tmp/web-safety-session-<id>-state      (hit log → Layer 4 escalation;
+                                   │                                            per-agent ...-agent-<aid>-state in subagents)
                                    ├─► /tmp/web-safety-session-<id>-fragments  (split-payload reassembly → Layer 4)
-                                   └─► /tmp/web-safety-session-<id>-armed       (timestamp, on HIGH → arms Layer 6)
+                                   ├─► /tmp/web-safety-session-<id>-armed       (timestamp, on HIGH or subagent kill → arms Layer 6)
+                                   └─► web-safety.log [PENDING-KILLED] row      (on subagent kill → Layer 7)
                                                           │
  later: a Bash command OR a web fetch ──► PreToolUse(Bash/web)  │ reads
                             [Layer 6] egress.sh ───────────────────┘
                                    armed + egress/outbound-fetch + non-allowlisted host → permissionDecision:"ask"
+
+ subagent resolves in parent ──► PostToolUse(Task|Agent)
+                            [Layer 7] agent-result.sh ── fresh [PENDING-KILLED] row for this agentId?
+                                   → factual additionalContext next to the (empty) result
+ turn about to end ──► Stop
+                            [Layer 7] stop-gate.sh ── unsurfaced kill rows? → block ONCE, summarize to user
 ```
 
 User-side config and audit live under `~/.claude/hooks/`: `url-allowlist.txt`, `url-blocklist.txt`, and the append-only `web-safety.log`.
@@ -131,6 +144,7 @@ Four slash commands ship with the plugin (auto-discovered on install). All are u
 
 Full per-version detail in [CHANGELOG.md](CHANGELOG.md). Recent releases:
 
+- **8.0.0** — **Layer 7: multi-agent visibility.** Fixes the silently-lost-subagent incident: a scanner halt inside a Task/Agent subagent kills that agent with no surviving explanation (the stopReason has no reader there; the toast evaporates). The kill stays a kill — capability-zero containment unchanged — but is now recorded to a `[PENDING-KILLED]` audit row (epoch/session/agent/severity k=v, auto-surfaced by `/web-safety-report`) and arms Layer 6 before the halt. Two new hooks consume the ledger: `web-safety-agent-result.sh` (PostToolUse on `Task|Agent`) injects factual context next to the resolving empty result so the orchestrator can re-dispatch excluding the flagged source, and `web-safety-stop-gate.sh` (Stop, one-shot, `stop_hook_active`-guarded) makes Claude tell the user before the turn ends. Escalation strikes are now scoped **per agent** (`...-agent-<aid>-state`), so parallel fan-out FP noise stops mass-escalating the fleet, and the strike count is recomputed under the state lock at append time — fixing a read→decide race where N parallel scanners all saw the same stale count and the 3-strike bound never fired. Main-session behavior is byte-identical. Probe-verified on CLI 2.1.169: `agent_id`/`agent_type` in subagent hook stdin, `tool_response.agentId` join key, Stop `decision:"block"`. New `run-agent-tests.sh` suite → 19 cases (now 6 suites · 234 cases).
 - **7.11.0** — Per-source **content-trust downgrade**: a new `url-content-trust.txt` list (and `/web-safety-trust <domain>`) tells the scanner to keep *detecting* on a trusted source but *downgrade the action* — no halt, no redaction — so you can read security articles that quote attack strings without the scanner deleting the very content you fetched. It still writes a `[TRUST-DOWNGRADE]` audit line (surfaced by `/web-safety-report`), still arms the Layer 6 exfiltration guard as the backstop, fires a non-blocking notification when it passes would-be-redacted patterns through, and deliberately doesn't feed cross-tool escalation. Distinct from `url-allowlist.txt` (soft URL pre-blocks only); hard URL blocks are unaffected. New `run-trust-tests.sh` suite → 21 cases (now 5 suites · 215 cases).
 - **7.10.0** — Windows toast notifications complete the cross-platform set: `_notify_windows` raises a WinRT toast via `powershell.exe` (severity → `ms-winsoundevent` sound), with WSL preferring in-distro `notify-send` when a display is present. Title/body cross to PowerShell as env vars (never interpolated into the command), and PowerShell is the authoritative sanitizer — it strips XML-illegal chars + CR/LF before `LoadXml` (closing an alert-suppression DoS where a raw control char would make the toast silently fail) then `SecurityElement::Escape`s. Notify suite → 21 cases; a CI step parse-checks the embedded toast PowerShell with `pwsh`.
 - **7.9.0** — Desktop notifications are now cross-platform: a new `web-safety-notify.sh` dispatcher routes the three notification sites (scanner alerts, exfiltration guard, URL pre-block) to macOS `osascript` or Linux `notify-send` (best-effort sound), detecting macOS/Linux/WSL/Windows and degrading to a silent no-op when no notifier/display is present. Per-platform sanitization replaces the macOS-only quote/backslash strip — Linux uses a `--` option-injection guard + Pango-markup escaping + C0/DEL control strip — and the dispatcher never writes to the hook's JSON stdout. macOS behaviour is byte-identical (all prior suites green). New `run-notify-tests.sh` suite → 15 cases. (Windows toast lands in a follow-up.)
@@ -160,7 +174,7 @@ Full per-version detail in [CHANGELOG.md](CHANGELOG.md). Recent releases:
 ./tests/run-trust-tests.sh  # content-trust downgrade — 21 cases
 ```
 
-53 scanner cases (single-fetch payloads + multi-fetch reassembly sequences + enforcement / large-input / performance assertions) across HIGH/MEDIUM/LOW/legit/reassembly buckets, covering all 8 evasion views, base64-encoded payloads, hex/decimal HTML-entity decoding, Layer-5 false-positive guards, multi-pattern HIGH combinations, ordering-token reorder attacks, cross-session isolation, letter-boundary and tail-split reassembly, already-fired suppression, 3-char affix-only fragments, confusable-letter bridges, multi-technique leetspeak, emoji false-positive guards (variation-selector / ZWJ / subdivision-flag, verified against the full 3,944-emoji Unicode corpus), and a 256 KB-page performance budget. A second suite (`run-cmd-tests.sh`) covers the report and allow/block helper scripts — including atomic/concurrent list adds, allowlist normalization, and SSRF hard-block classes through the pre-screen. A third (`run-egress-tests.sh`) covers the Layer 6 outbound exfiltration guard across **both** the Bash and web-fetch channels — arm-state production, the ask/defer decision, allowlist exemption and upload-aware non-exemption, session isolation, and path-qualified-binary boundary cases. A fourth (`run-notify-tests.sh`) covers the cross-platform notification dispatcher — platform detection (macOS/Linux/WSL/Windows), the Linux `--` option-injection guard, Pango-markup escaping and C0/DEL control strip, the headless (no-DBUS) skip, the Windows toast contract (env-var passing, control/CRLF strip, `ms-winsoundevent` mapping, no-powershell fail-safe), and the hard invariant that a noisy notifier never leaks onto the hook's JSON stdout. A fifth (`run-trust-tests.sh`) covers the per-source content-trust downgrade — that a trusted host's HIGH/MEDIUM detection passes through unredacted and unhalted while still logging `[TRUST-DOWNGRADE]` and arming Layer 6, that subdomains match, that a trust entry never globally exempts other hosts, that clean content on a trusted host fabricates nothing, that downgrades don't pollute cross-tool escalation, and the `listctl trust` validation. All five run in CI on a Linux + macOS matrix, where a `pwsh` step also parse-checks the embedded Windows toast PowerShell (no Windows runner exists, so this guards against a syntax error silently breaking the toast). See [tests/README.md](tests/README.md).
+53 scanner cases (single-fetch payloads + multi-fetch reassembly sequences + enforcement / large-input / performance assertions) across HIGH/MEDIUM/LOW/legit/reassembly buckets, covering all 8 evasion views, base64-encoded payloads, hex/decimal HTML-entity decoding, Layer-5 false-positive guards, multi-pattern HIGH combinations, ordering-token reorder attacks, cross-session isolation, letter-boundary and tail-split reassembly, already-fired suppression, 3-char affix-only fragments, confusable-letter bridges, multi-technique leetspeak, emoji false-positive guards (variation-selector / ZWJ / subdivision-flag, verified against the full 3,944-emoji Unicode corpus), and a 256 KB-page performance budget. A second suite (`run-cmd-tests.sh`) covers the report and allow/block helper scripts — including atomic/concurrent list adds, allowlist normalization, and SSRF hard-block classes through the pre-screen. A third (`run-egress-tests.sh`) covers the Layer 6 outbound exfiltration guard across **both** the Bash and web-fetch channels — arm-state production, the ask/defer decision, allowlist exemption and upload-aware non-exemption, session isolation, and path-qualified-binary boundary cases. A fourth (`run-notify-tests.sh`) covers the cross-platform notification dispatcher — platform detection (macOS/Linux/WSL/Windows), the Linux `--` option-injection guard, Pango-markup escaping and C0/DEL control strip, the headless (no-DBUS) skip, the Windows toast contract (env-var passing, control/CRLF strip, `ms-winsoundevent` mapping, no-powershell fail-safe), and the hard invariant that a noisy notifier never leaks onto the hook's JSON stdout. A fifth (`run-trust-tests.sh`) covers the per-source content-trust downgrade — that a trusted host's HIGH/MEDIUM detection passes through unredacted and unhalted while still logging `[TRUST-DOWNGRADE]` and arming Layer 6, that subdomains match, that a trust entry never globally exempts other hosts, that clean content on a trusted host fabricates nothing, that downgrades don't pollute cross-tool escalation, and the `listctl trust` validation. A sixth (`run-agent-tests.sh`) covers Layer 7 multi-agent visibility — that a subagent MEDIUM/ESCALATED halt writes the `[PENDING-KILLED]` ledger row and arms Layer 6 while the main-session path stays byte-identical, per-agent escalation scoping (cross-agent hits don't pool; the no-`agent_id` session fallback still escalates), the locked atomic recount under parallel scanners (exactly one of two concurrent strikes escalates, no lost rows), the attribution hook's row→`additionalContext` join with session/freshness filters, and the Stop gate's one-shot + `stop_hook_active` contracts. All six run in CI on a Linux + macOS matrix, where a `pwsh` step also parse-checks the embedded Windows toast PowerShell (no Windows runner exists, so this guards against a syntax error silently breaking the toast). See [tests/README.md](tests/README.md).
 
 ## License
 

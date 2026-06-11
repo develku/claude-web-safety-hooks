@@ -137,6 +137,7 @@ Entry types:
 - `[PRE-BLOCK]` — URL pre-screening rejected the URL before fetching
 - `[CLEARED]` — Layer 5 verifier auto-cleared a false positive (does NOT count toward escalation)
 - `[TRUST-DOWNGRADE]` — the host is on `url-content-trust.txt`, so a `would_be` HIGH/MEDIUM was passed through unredacted (not halted); Layer 6 was still armed. Does NOT count toward escalation. Audit these to confirm your trust list isn't masking a real attack.
+- `[PENDING-KILLED]` — a detection halted a **subagent** (k=v: `epoch= session= agent= severity= tool= url= patterns=`). The kill itself is the containment; this row is what makes it visible — it is what `web-safety-agent-result.sh` joins against to explain the death to the orchestrator and what the Stop gate surfaces to you at turn end. Layer 6 was armed at write time.
 - `[SCANNER-ERROR]` — internal error (malformed pattern, system issue); the scanner fails-closed and surfaces a synthetic HIGH-severity hit so the user is alerted
 
 ## False-positive workflow
@@ -151,9 +152,9 @@ If the scanner pauses you on legitimate content:
 
 ## Cross-tool escalation + reassembly tuning
 
-The scanner escalates MEDIUM → HIGH when 3+ tools trigger injection warnings in a 5-minute window. The constants are `SESSION_WINDOW=300` (seconds) and the check `if [ "$SESSION_HITS" -ge 2 ]` (current call makes it 3+). Tighten by lowering the threshold; loosen by raising the window.
+The scanner escalates MEDIUM → HIGH when 3+ calls trigger injection warnings in a 5-minute window. The constants are `SESSION_WINDOW=300` (seconds) and the check `if [ "$SESSION_HITS_NOW" -ge 3 ]` in the MEDIUM branch — since v8 the count is recomputed under the state-file lock at append time (the old script-start read raced under parallel subagents), and strikes are scoped **per agent** when the hook input carries `agent_id` (so independent fan-out agents don't pool their false positives into a fleet-wide ESCALATED; without `agent_id` the v7 whole-session scope applies). Tighten by lowering the threshold; loosen by raising the window. The E8 fragment store stays session-wide regardless — split-payload reassembly is cross-agent content evidence.
 
-Session state is stored at `/tmp/web-safety-session-${SESSION_ID}-state` (correlation) and `/tmp/web-safety-session-${SESSION_ID}-fragments` (E8 reassembly excerpts). Both are scoped per Claude Code session via `CLAUDE_SESSION_ID` (or `PPID` fallback). Wipe manually for a clean slate:
+Session state is stored at `/tmp/web-safety-session-${SESSION_ID}-state` (correlation; `/tmp/web-safety-session-${SESSION_ID}-agent-<agent_id>-state` inside subagents) and `/tmp/web-safety-session-${SESSION_ID}-fragments` (E8 reassembly excerpts). Both are scoped per Claude Code session via `CLAUDE_SESSION_ID` (or `PPID` fallback). Wipe manually for a clean slate:
 
 ```bash
 rm -f /tmp/web-safety-session-*-state /tmp/web-safety-session-*-fragments
