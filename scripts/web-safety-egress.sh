@@ -129,6 +129,26 @@ emit_guard() {
 # ALLOWLISTED host is exempt — the user positively trusted that destination;
 # closing it would block all fetches to trusted hosts while armed.
 if [ "$TOOL_NAME" != "Bash" ] && [ -z "$COMMAND" ]; then
+  # WebSearch downgrade (Fix 1 — DCA 20260618T210522). The native WebSearch tool
+  # has no attacker-chosen destination: its query goes to the configured search
+  # provider, not an arbitrary endpoint, so it is NOT the arbitrary-host exfil
+  # vector this channel guards. While armed, downgrade it — log, do not prompt —
+  # which removes the dominant armed-window prompt flood (104 of 147 fetch-channel
+  # asks in the motivating incident were WebSearch). EXACT tool-name match only:
+  # WebFetch, Bash, and MCP fetch/search tools (whose destination may be
+  # attacker-chosen or sit in a field we do not parse) stay fail-closed below.
+  # Arming is unchanged — the scanner still arms on a HIGH found in the search
+  # RESULTS, so a follow-up WebFetch/Bash egress still asks. Accepted residual
+  # (logged, NOT prompted): a secret smuggled into the query reaches the search
+  # provider's logs — low-bandwidth, provider-bound, indirect attacker
+  # observability. The full query is control-stripped + bounded (log-injection
+  # safe, mirroring emit_guard) and recorded under [EGRESS-SEARCH-DOWNGRADE].
+  if [ "$TOOL_NAME" = "WebSearch" ]; then
+    mkdir -p "$CONFIG_DIR" 2>/dev/null
+    q_safe=$(printf '%s' "$INPUT" | jq -r '.tool_input.query // ""' 2>/dev/null | tr -d '\000-\037\177' | cut -c1-200)
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] [EGRESS-SEARCH-DOWNGRADE] session=${SESSION_ID} query=\"${q_safe}\"" >> "$LOG_FILE" 2>/dev/null
+    exit 0
+  fi
   WF_HOST=""
   if command -v normalize_host >/dev/null 2>&1 && [ -n "$WF_URL" ]; then
     WF_HOST=$(normalize_host "$WF_URL")

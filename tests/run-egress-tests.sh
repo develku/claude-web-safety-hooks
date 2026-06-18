@@ -311,6 +311,27 @@ arm_fresh
 out=$(egress_for "echo discuss https and tls best practices"); ec=$?
 { [ $ec -eq 0 ] && [ -z "$out" ]; } && ok "armed + prose 'https' (arg-shape) → defer (no FP)" || bad "prose https → defer (out=$out)"
 
+# ── Fix 1: WebSearch egress downgrade (DCA 20260618T210522) ───────────────────
+# Native WebSearch has no attacker-chosen destination (the query goes to the
+# configured search provider, not an arbitrary endpoint), so while armed it is
+# DOWNGRADED: logged, not prompted. EXACT tool-name match only — WebFetch, Bash,
+# and MCP fetch/search tools stay fail-closed (asserted elsewhere in this file).
+egress_search() { jq -nc --arg q "$1" '{tool_name:"WebSearch", tool_input:{query:$q}}' | "$EGRESS"; }
+reset_state; arm_fresh; : > "$CFG/web-safety.log"
+out=$(egress_search "durable execution workflows"); ec=$?
+{ [ $ec -eq 0 ] && [ -z "$out" ]; } && ok "armed + WebSearch → defer (downgraded, not ask)" || bad "armed + WebSearch → defer (out=$out)"
+# the downgrade is logged for post-hoc audit (visibility of the accepted residual)
+grep -q 'EGRESS-SEARCH-DOWNGRADE' "$CFG/web-safety.log" 2>/dev/null \
+  && ok "WebSearch downgrade logged [EGRESS-SEARCH-DOWNGRADE]" || bad "WebSearch downgrade logged"
+# regression: an MCP search tool is NOT native WebSearch → stays fail-closed ASK
+arm_fresh
+out=$(jq -nc '{tool_name:"mcp__exa__search", tool_input:{query:"x"}}' | "$EGRESS")
+is_ask "$out" && ok "armed + mcp search (≠ WebSearch) → still ask (exact-match)" || bad "mcp search still ask (out=$out)"
+# not armed + WebSearch → defer (no downgrade, exits at the armed gate)
+disarm
+out=$(egress_search "anything"); ec=$?
+{ [ $ec -eq 0 ] && [ -z "$out" ]; } && ok "not armed + WebSearch → defer" || bad "not armed + WebSearch → defer (out=$out)"
+
 # ── Mode-aware enforcement: block where 'ask' is ignored, ask where honored ───
 # (Phase 0 proved bypassPermissions discards permissionDecision:"ask" but honors
 #  the legacy {decision:"block"}; the guard must route by permission_mode.)

@@ -2,6 +2,44 @@
 
 All notable changes to this project. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [8.1.0] — 2026-06-18
+
+**Layer 6: WebSearch egress downgrade** — stops the armed-window prompt flood. Once a
+HIGH-severity injection arms Layer 6, every outbound action for 300s escalates to an
+interactive `ask`; a parallel web-research burst performs hundreds of operations inside
+that window, and **`WebSearch` dominated the storm** — in the motivating incident 104 of
+147 fetch-channel asks were `WebSearch`, all logged `url=<unparsed>`. A WebSearch has no
+attacker-chosen destination (its query goes to the configured search provider, not an
+arbitrary endpoint), so escalating it was a fail-closed artifact of the unparsable-target
+rule, not a real exfil guard. Decision via cross-model DCA (`20260618T210522`,
+gpt-5.5 + Opus 4.8 converged on `O-A + log-only`, rejecting the broader shape-based
+exemption as a fail-closed-contract regression): exempt **only** the exact native
+`WebSearch` tool — log, do not prompt — and keep every other channel fail-closed.
+
+### Changed
+
+- **`web-safety-egress.sh`** — while armed, an exact-match `WebSearch` (`TOOL_NAME ==
+  "WebSearch"`) is downgraded: it writes an `[EGRESS-SEARCH-DOWNGRADE]` audit line (full
+  query, control-stripped + length-bounded, mirroring `emit_guard`'s log-injection
+  hygiene) and defers instead of emitting `ask`. `WebFetch`, Bash network commands, and
+  MCP `*fetch*`/`*search*`/`*crawl*` tools (whose destination may be attacker-chosen or
+  sit in a field the hook does not parse) stay fail-closed exactly as before — the match
+  is an exact string, never a prefix or regex.
+- **Arming is unchanged.** The PostToolUse scanner still arms Layer 6 on a HIGH found in
+  the search *results*, so a follow-up `WebFetch`/Bash egress in the same window still
+  asks. Only the egress hook's *prompt* on the WebSearch call itself is suppressed.
+- Accepted residual (logged, not prompted): a secret smuggled into a `WebSearch` query
+  reaches the search provider's logs — low-bandwidth, provider-bound, indirect attacker
+  observability. The full query is retained under `[EGRESS-SEARCH-DOWNGRADE]` for
+  post-hoc audit; a one-shot per-window notify is a possible follow-up.
+
+### Tests
+
+- `run-egress-tests.sh` → **96 cases** (+4): armed `WebSearch` defers and logs the
+  downgrade; a non-`WebSearch` MCP search tool still asks (exact-match discipline);
+  not-armed `WebSearch` defers. Suite total now **6 suites · 259 cases**, all green on
+  the Linux + macOS matrix.
+
 ## [8.0.0] — 2026-06-11
 
 **Layer 7: multi-agent visibility** — die-but-visible. Fixes a real incident: during
