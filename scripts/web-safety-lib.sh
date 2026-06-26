@@ -147,3 +147,37 @@ host_in_list() {
   done < "$listfile"
   return 1
 }
+
+# is_fetch_command <command-string> — true (0) if the command invokes a tool whose
+# normal job is to fetch remote web content TO STDOUT (curl/wget/aria2c, HTTPie by
+# arg-shape, or a text browser). This is the Layer 8 routing predicate: a TRUE
+# result means the command's stdout should be replayed into web-safety-scanner.sh
+# for injection scanning (web-safety-bash-scan.sh). The web-fetch content scanner
+# is wired to WebFetch/WebSearch/MCP only, so a `curl https://evil.com` otherwise
+# bypasses the whole pipeline.
+#
+# Deliberately NARROW (v1): direct fetch-to-stdout tools only. EXCLUDES git
+# clone/pull, pip/npm/gem install (payload lands on disk; stdout is progress/ref/
+# install chatter), and nc/socat/ssh/scp/dns/git-push (egress.sh's OUTBOUND turf,
+# FP-heavy stdout). A loose match is SAFE: the scanner halts only on an actual
+# content pattern match, so an over-trigger costs one wasted scan of benign output,
+# never a false halt. The narrowness closes direct fetch-command stdout, NOT all
+# Bash-mediated network ingress (documented residual gaps in docs/patterns.md).
+#
+# Boundary discipline mirrors web-safety-egress.sh:150-160 — the leading
+# (^|[^a-zA-Z0-9_.]) and trailing ([^a-zA-Z0-9_./-]|$) exclude path chars so
+# `cat ~/.curlrc` and `wget.conf` do NOT match the binary, while a quoted `'curl'`
+# and a path-qualified `/usr/bin/curl` still do. HTTPIE_RE matches the http/https
+# BINARY by argument shape, not a prose mention.
+#
+# (Future dedup: the binary list overlaps egress.sh's EGRESS_RE, but that is an
+# OUTBOUND predicate carrying members — scp/ssh/dns/git-push — that must NOT count
+# as inbound fetches. Kept separate for v1 rather than refactoring working code.)
+is_fetch_command() {
+  local cmd="$1"
+  local FETCH_RE='(^|[^a-zA-Z0-9_.])(curl|wget|aria2c|lynx|links2?|elinks|w3m)([^a-zA-Z0-9_./-]|$)'
+  local HTTPIE_RE='(^|[^a-zA-Z0-9_.])https?[[:space:]]+(get|post|put|delete|head|patch|options|localhost|[a-z0-9_-]+\.[a-z]|[0-9]{1,3}\.[0-9]|:[0-9]|https?://|-)'
+  printf '%s' "$cmd" | grep -qEi "$FETCH_RE" && return 0
+  printf '%s' "$cmd" | grep -qEi "$HTTPIE_RE" && return 0
+  return 1
+}

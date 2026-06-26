@@ -37,6 +37,16 @@
         ]
       },
       {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/scripts/web-safety-bash-scan.sh",
+            "timeout": 10000
+          }
+        ]
+      },
+      {
         "matcher": "Task|Agent",
         "hooks": [
           {
