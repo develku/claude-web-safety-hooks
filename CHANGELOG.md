@@ -2,6 +2,61 @@
 
 All notable changes to this project. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [8.1.0] — 2026-06-26
+
+**Layer 8: Bash-fetched web-content scanning.** Closes a full bypass. The Layer 2–5
+content scanner is wired to the web-fetch matcher (WebFetch/WebSearch/MCP web tools)
+only, so web content pulled by a **Bash** command — `curl https://evil.com` — returns
+as Bash *stdout* and was never scanned for injection: every downstream layer (redaction,
+cross-tool correlation, Layer-6 arming) was bypassed. Surfaced by comparing against
+`lasso-security/claude-hooks`, which scans Bash PostToolUse output; their idea is sound,
+their advisory (warn-only) enforcement is not — this uses the existing halt-based engine.
+
+Design decided via DCA artifact `20260626T112720_web-safety-bash-fetch-scanner-layer8.md`
+(cross-model leg: gpt-5.5, thread `019f018c-d86c-7c02-af99-1a4358339951`; verdict
+REFINED-AND-PROCEED). Architecture: a thin routing gate, NOT a branch inside the
+2200-line scanner (keeps the web path byte-identical, stays under the 800-line ceiling,
+independently testable).
+
+### Added
+
+- **`web-safety-bash-scan.sh`** — new PostToolUse hook on the `Bash` matcher (10s
+  timeout). A **routing gate**: it reads `.tool_input.command`, and only when the command
+  is web-fetch-shaped does it replay the **byte-identical** hook stdin into
+  `web-safety-scanner.sh` as a subprocess — reusing the whole engine (8 evasion views,
+  600+ patterns, base64/leet, Layer-6 arming, Layer-4 correlation, audit log, Layer-7
+  kill ledger, halt JSON). A non-fetch command exits immediately **without scanning**,
+  so routine `cat`/`ls`/`grep`/`echo` output never reaches the halting scanner. The
+  verbatim replay (no jq envelope rebuild) preserves `agent_id`/`session_id`, so the
+  subagent (Layer 7) and correlation (Layer 4) paths work unchanged.
+- **`is_fetch_command()` in `web-safety-lib.sh`** — the narrow v1 fetch predicate:
+  `curl`/`wget`/`aria2c`, HTTPie (`http`/`https` by argument shape), and text browsers
+  (`lynx`/`links`/`links2`/`elinks`/`w3m`). Boundary discipline mirrors Layer 6
+  (case-insensitive; path-qualified `/usr/bin/curl` and quoted `'curl'` match; path
+  components like `cat ~/.curlrc` and `wget.conf` do not). A loose match is safe — the
+  scanner halts only on an actual content match, so an over-trigger is one wasted scan,
+  never a false halt.
+- **`tests/run-bash-scan-tests.sh`** — 24 cases (now 7 suites · 279 cases). Core
+  discriminator: identical injected stdout halts from `curl …` but is never scanned from
+  `cat …`. Covers FP guards, allowlist-does-not-suppress-content-scan, subagent ledger +
+  Layer-6 arming, halt mode-independence, and degenerate inputs. Wired into the
+  Linux+macOS CI matrix.
+
+### Scope / limitations
+
+- **Deliberately narrow.** `git clone`/`pull`, `pip`/`npm`/`gem install` (payload lands on
+  disk, not stdout) and `nc`/`socat`/`ssh`/`scp` (Layer 6's outbound turf) are out of v1.
+  Residual gaps documented in `docs/patterns.md`: redirect-to-file (`curl … -o f`),
+  transforming pipes (`| base64`), `| bash` (a settings.json-deny concern), script-file /
+  variable-indirected / base64-decoded invocations. Closes direct fetch-command stdout,
+  **not** all Bash network ingress.
+- **Enforcement floor.** Detection + `continue:false` **halt** + Layer-6 arming are
+  tool-agnostic and fire for Bash as for WebFetch. Whether `toolResult` redaction changes
+  what the model ingests for a *Bash* result is **not yet empirically probed** (it is
+  by-design for WebFetch) — the halt + arming is the load-bearing guard; a version-stamped
+  Bash-specific `continue:false`-timing probe gates any future "ingestion-prevention" claim.
+- **Web-fetch path is byte-identical.** All prior 6 suites (255 cases) unchanged and green.
+
 ## [8.0.0] — 2026-06-11
 
 **Layer 7: multi-agent visibility** — die-but-visible. Fixes a real incident: during

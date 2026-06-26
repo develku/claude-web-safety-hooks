@@ -223,3 +223,31 @@ Matched Bash egress command shapes (matching is case-insensitive, and path-quali
 A command whose destination host is in `url-allowlist.txt` is exempt — **unless it uploads data** (`-d`/`--data*`/`-F`/`--form*`/`-T`/`--upload-file`/`--json`/`--url-query`/wget `--post-data`/`--post-file`/`--body-*`) to that host, since exfil to a trusted host is still exfil (v7.5+). A pure transfer (`scp`/`rsync`) *to* an allowlisted host stays exempt — the user explicitly trusted that destination. A command with **no extractable host** (e.g. host hidden in a `python -c` variable) is treated as untrusted and still escalates.
 
 **Documented limitation:** heavy obfuscation (base64-decoded commands, variable-indirected/token-split binary names like `c""url`, transfer tools not in the list — e.g. cloud-storage CLIs, package-manager fetch/publish, a DNS lookup via a non-standard resolver binary or raw `/dev/udp/…/53`) can still evade the pattern set. The guard arms only after a HIGH detection — it is a second line of defense, not a complete egress sandbox.
+
+## Layer 8 — Bash-fetched web content (v8.1+)
+
+The Layer 2–5 content scanner is wired to the web-fetch matcher (WebFetch/WebSearch/MCP web tools) only. Web content pulled by a **Bash** command — `curl https://evil.com` — returns as Bash *stdout*, which the scanner never saw: a full bypass of the detection pipeline. Layer 8 closes that hole.
+
+A PostToolUse hook on the `Bash` matcher ([`web-safety-bash-scan.sh`](../scripts/web-safety-bash-scan.sh)) acts as a **routing gate**: it inspects `.tool_input.command` and, only when the command is *web-fetch-shaped*, replays the byte-identical hook stdin into [`web-safety-scanner.sh`](../scripts/web-safety-scanner.sh) — reusing the entire engine (8 views, all patterns, Layer-6 arming, Layer-4 correlation, audit log, Layer-7 kill ledger, halt JSON). A non-fetch command (`cat`/`ls`/`grep`/`echo`) exits immediately **without scanning**, so routine output never reaches the halting scanner.
+
+**Fetch predicate (`is_fetch_command`, narrow by design).** v1 triggers a scan only for tools whose normal job is to fetch remote content **to stdout**:
+
+- Transfer-to-stdout: `curl`, `wget`, `aria2c`
+- HTTPie: leading `http `/`https ` (by argument shape — an HTTP method, a URL/host-with-TLD, `:port`, scheme, or flag; a bare TLD-less host like `http api` is not matched, a documented v1 limitation)
+- Text browsers: `lynx`, `links`/`links2`/`elinks`, `w3m`
+
+Boundary discipline matches Layer 6 (case-insensitive; path-qualified `/usr/bin/curl` and quoted `'curl'` match; path components like `cat ~/.curlrc` and `wget.conf` do **not**). A loose match is safe: the scanner halts only on an actual content match, so an over-trigger costs one wasted scan of benign output, never a false halt.
+
+**Deliberately NOT in the v1 predicate** (each documented as a residual gap, not an oversight):
+
+- `git clone`/`git pull`, `pip`/`npm`/`gem install` — the fetched payload lands on **disk**, not stdout (stdout is progress/ref/install chatter). Scanning it is false-positive noise for near-zero injection surface.
+- `nc`/`socat`/`ssh`/`scp` — Layer 6's outbound turf; their stdout shape is unpredictable and FP-heavy.
+
+**Residual gaps (out of v1 scope — this closes direct fetch-command stdout, NOT all Bash-mediated network ingress):**
+
+1. `curl … -o file.txt` / `> file.txt` — no stdout to scan; a later `cat file.txt` is not fetch-shaped, so it is unscanned. (Largest gap.)
+2. `curl … | base64` / `| gzip` / `| head` — stdout is transformed before the hook sees it.
+3. `curl … | bash` — an *execution* concern that belongs to the `settings.json` deny layer, not content scanning.
+4. Fetch via a script file (`./fetch.sh`), a variable-indirected binary (`C=curl; $C …`), or a base64-decoded command — the predicate sees the wrong bareword.
+
+**Enforcement floor.** Detection + `continue:false` **halt** + Layer-6 arming are tool-agnostic and fire for Bash exactly as for WebFetch. The scanner's `toolResult` redaction — whether replacing the Bash result actually changes what the model ingests — is **not yet empirically verified for the Bash channel** (it is by-design for WebFetch); the **halt** is the load-bearing guard, with Layer-6 arming as the backstop that breaks the inject→exfil chain regardless of redaction. This is web-injection scanning of fetch *output*; it does **not** block the command (PostToolUse runs after execution) and stays within the plugin's web-injection scope.

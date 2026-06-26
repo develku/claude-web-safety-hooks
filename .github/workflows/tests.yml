@@ -59,6 +59,9 @@ jobs:
       - name: Run multi-agent visibility test suite
         run: ./tests/run-agent-tests.sh
 
+      - name: Run Bash-fetch scan test suite
+        run: ./tests/run-bash-scan-tests.sh
+
       - name: Validate embedded Windows toast PowerShell (pwsh parser)
         # No Windows runner exists, so the WinRT toast can't run here — but the
         # runner-provided pwsh can parse-check the embedded script for SYNTAX
