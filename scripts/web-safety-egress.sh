@@ -61,6 +61,24 @@ WINDOW=300   # keep in sync with SESSION_WINDOW in web-safety-scanner.sh
 CONFIG_DIR="${WEB_SAFETY_CONFIG_DIR:-$HOME/.claude/hooks}"
 ALLOWLIST="$CONFIG_DIR/url-allowlist.txt"
 LOG_FILE="$CONFIG_DIR/web-safety.log"
+# Plugin-shipped DEFAULT allowlist, layered UNDER the user file. A small,
+# conservative set of trusted egress destinations (finalized by DCA
+# 20260705T195623) so armed-window research fetches to obviously-trusted hosts
+# stop prompting even before the user curates url-allowlist.txt. Resolves as a
+# sibling of this hook — correct in the plugin runtime (${CLAUDE_PLUGIN_ROOT}/
+# scripts) AND in tests (repo scripts/), same idiom as LIB above; NO env
+# dependency. Disable the whole default layer (fall back to user-file-only) with
+# WEB_SAFETY_DEFAULT_ALLOWLIST_DISABLE=1.
+DEFAULT_ALLOWLIST="$(cd "$(dirname "$0")" && pwd)/web-safety-default-allowlist.txt"
+[ "${WEB_SAFETY_DEFAULT_ALLOWLIST_DISABLE:-0}" = "1" ] && DEFAULT_ALLOWLIST=""
+# Notification rate-limit — mirror the scanner (scanner.sh RATE_LIMIT_*) so an
+# armed burst does not fire one desktop toast per event. OWN file (NOT shared with
+# the scanner): the two toasts are independent signals — the scanner's "injection
+# detected" and the egress guard's "outbound-after-injection" must not suppress
+# each other. Gates ONLY the toast; the JSON decision + the audit log line stay
+# per-event.
+RATE_LIMIT_FILE="/tmp/web-safety-egress-last-notify"
+RATE_LIMIT_SECONDS=5
 
 # Step 1 — armed & fresh?
 [ -f "$ARM_FILE" ] || exit 0
@@ -69,15 +87,44 @@ case "$ARMED_AT" in ''|*[!0-9]*) exit 0 ;; esac   # garbage/empty → fail-open 
 NOW=$(date +%s)
 [ $(( NOW - ARMED_AT )) -le "$WINDOW" ] || exit 0  # stale → defer
 
-# host_allowlisted <host> — true (0) if host (or a parent domain) is allowlisted.
-# Uses the shared lib; if the lib is missing, fail toward ASK (return non-zero).
+# host_allowlisted <host> — true (0) if host (or a parent domain) is on the
+# plugin-shipped default allowlist OR the user's url-allowlist.txt. Uses the shared
+# multi-file wrapper; if the lib is missing, fail toward ASK (return non-zero).
 host_allowlisted() {
-  command -v host_in_list >/dev/null 2>&1 || return 1
-  host_in_list "$1" "$ALLOWLIST"
+  command -v host_in_any_list >/dev/null 2>&1 || return 1
+  host_in_any_list "$1" "$DEFAULT_ALLOWLIST" "$ALLOWLIST"
 }
 
-# emit_guard <reason> <log-tag> <log-detail> — log + notify + emit a MODE-AWARE
-# enforcement decision, exit 0.
+# Repeat-ask allowlist suggestion (suggest-only per DCA 20260705T195623). NEVER
+# auto-adds a host: a single injected+approved fetch to an attacker host must never
+# become permanently trusted, and an attacker could otherwise manufacture repeated
+# asks until their relay is allowlisted — so the human always decides.
+SUGGEST_THRESHOLD="${WEB_SAFETY_SUGGEST_THRESHOLD:-3}"
+
+# maybe_suggest_allow <host> — echo a ONE-LINE hint (leading space) the FIRST time
+# <host> reaches SUGGEST_THRESHOLD asks this session, else nothing. Best-effort; all
+# file ops fail silent. <host> is sanitized to an fs-safe key (and required to look
+# like a real dotted hostname) so a hostile/invalid authority can neither traverse
+# the tally path nor reach the user-facing string unfiltered.
+maybe_suggest_allow() {
+  local host="$1" key tally n marker
+  [ -n "$host" ] || return 0
+  key=$(printf '%s' "$host" | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9.-' | cut -c1-200)
+  case "$key" in *.*) : ;; *) return 0 ;; esac   # require a dotted host (skips ws-invalid-authority, bare tokens)
+  tally="/tmp/web-safety-session-${SESSION_ID}-askcount-${key}"
+  marker="/tmp/web-safety-session-${SESSION_ID}-suggested-${key}"
+  n=$(cat "$tally" 2>/dev/null | tr -cd '0-9'); [ -n "$n" ] || n=0
+  n=$((n + 1))
+  echo "$n" > "$tally" 2>/dev/null
+  if [ "$n" -ge "$SUGGEST_THRESHOLD" ] && [ ! -f "$marker" ]; then
+    : > "$marker" 2>/dev/null
+    printf ' Tip: this session has asked about %s %d times — run /web-safety:allow %s to stop asking (only if YOU trust it).' "$key" "$n" "$key"
+  fi
+}
+
+# emit_guard <reason> <log-tag> <log-detail> [host] — log + notify + emit a
+# MODE-AWARE enforcement decision, exit 0. The optional <host> drives the one-shot
+# repeat-ask allowlist suggestion appended to the reason (empty host = no hint).
 #
 # Why mode-aware: a hook's permissionDecision:"ask" is only effective in modes
 # that actually surface an interactive prompt. In bypassPermissions/auto/dontAsk
@@ -91,14 +138,24 @@ host_allowlisted() {
 #   ask-ignoring modes (bypassPermissions/auto/dontAsk)
 #     → {decision:"block"} (escape via url-allowlist.txt or the kill switch)
 emit_guard() {
-  local reason="$1" tag="$2" detail safe
+  local reason="$1" tag="$2" detail safe host="${4:-}" hint
   detail="$3"
+  hint=$(maybe_suggest_allow "$host")
+  reason="${reason}${hint}"
   mkdir -p "$CONFIG_DIR" 2>/dev/null
   # Strip control chars (C0+DEL) and truncate before logging (log-injection safe).
   safe=$(printf '%s' "$detail" | tr -d '\000-\037\177' | cut -c1-200)
   echo "[$(date '+%Y-%m-%d %H:%M:%S')] [${tag}] session=${SESSION_ID} ${safe}" >> "$LOG_FILE" 2>/dev/null
-  # Cross-platform notify (dispatcher applies the per-platform metachar escaping).
-  notify_dispatch "MEDIUM" "🛡️ Exfiltration Guard" "$safe" "Outbound activity after flagged injection" "Sosumi"
+  # Cross-platform notify (dispatcher applies the per-platform metachar escaping),
+  # rate-limited to at most one toast per RATE_LIMIT_SECONDS. Best-effort: the log
+  # line above and the JSON decision below are NEVER gated by this.
+  _rl_now=$(date +%s)
+  _rl_last=""
+  [ -f "$RATE_LIMIT_FILE" ] && _rl_last=$(cat "$RATE_LIMIT_FILE" 2>/dev/null | tr -cd '0-9')
+  if [ -z "$_rl_last" ] || [ $(( _rl_now - _rl_last )) -ge "$RATE_LIMIT_SECONDS" ]; then
+    echo "$_rl_now" > "$RATE_LIMIT_FILE" 2>/dev/null
+    notify_dispatch "MEDIUM" "🛡️ Exfiltration Guard" "$safe" "Outbound activity after flagged injection" "Sosumi"
+  fi
   case "$PERM_MODE" in
     bypassPermissions|auto|dontAsk)
       jq -n --arg r "$reason" '{decision: "block", reason: $r}' ;;
@@ -157,7 +214,7 @@ if [ "$TOOL_NAME" != "Bash" ] && [ -z "$COMMAND" ]; then
     exit 0
   fi
   emit_guard "⚠️ Outbound fetch after a HIGH-severity prompt-injection was flagged in this session within the last 5 minutes, to a destination that is not on the trusted allowlist. This may be an exfiltration attempt directed by injected web content. Approve only if YOU initiated this fetch." \
-    "EGRESS-ASK-FETCH" "tool=${TOOL_NAME} url=${WF_URL:-<unparsed>}"
+    "EGRESS-ASK-FETCH" "tool=${TOOL_NAME} url=${WF_URL:-<unparsed>}" "$WF_HOST"
 fi
 
 # ── Bash channel ─────────────────────────────────────────────────────────────
@@ -238,6 +295,13 @@ HOSTS_EOF
 fi
 [ "$EXEMPT" = "1" ] && exit 0
 
+# Suggest a single, unambiguous host only — a multi-host one-liner has no one
+# target to name, so it gets no hint (empty → maybe_suggest_allow no-ops).
+SUGGEST_HOST=""
+if [ "$(printf '%s\n' "$HOSTS" | grep -c '[a-z0-9]')" = "1" ]; then
+  SUGGEST_HOST=$(printf '%s' "$HOSTS" | tr -d '[:space:]')
+fi
+
 # Step 4 — armed + egress → ASK
 emit_guard "⚠️ Outbound network command issued after a HIGH-severity prompt-injection was flagged in this session within the last 5 minutes. This may be an exfiltration attempt directed by injected web content. Approve only if YOU initiated this request." \
-  "EGRESS-ASK" "cmd=\"$(printf '%s' "$COMMAND" | tr -d '\n' | cut -c1-200)\""
+  "EGRESS-ASK" "cmd=\"$(printf '%s' "$COMMAND" | tr -d '\n' | cut -c1-200)\"" "$SUGGEST_HOST"

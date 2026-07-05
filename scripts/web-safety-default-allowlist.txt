@@ -1,0 +1,56 @@
+# web-safety-default-allowlist.txt — SHIPPED DEFAULT trusted-destination allowlist
+# for the Layer-6 outbound exfiltration guard (web-safety-egress.sh) ONLY.
+#
+# WHY THIS EXISTS: while the guard is "armed" (a prompt-injection was just flagged
+# this session), every fetch to a host NOT on an allowlist is escalated to a user
+# "ask". Research on AI/security topics is exactly what arms the guard (papers and
+# blogs about injection legitimately contain the scanner's trigger strings), so an
+# empty allowlist produced a prompt flood to obviously-trusted research hosts. This
+# ships a small, conservative default so those fetches stop prompting.
+#
+# MEMBERSHIP RULE (this is a SECURITY control, not a reputation list): a host
+# belongs here ONLY if an attacker who controls a resource on it CANNOT read back
+# the query strings / paths / bodies of arbitrary requests. Reason: while armed, an
+# injected instruction could try to exfiltrate a secret via GET
+# `HOST/path?data=<secret>`; being on this list downgrades the "ask", so a host
+# whose request metadata an attacker can observe (user-runnable web apps, repo/
+# project traffic analytics, request-bins, URL-shortener analytics) is an exfil
+# RELAY and must NOT be here. GET-only static-content / first-party hosts are the
+# safe class. Finalized by cross-model DCA 20260705T195623 (see ~/.claude/dca/).
+# Deliberately EXCLUDED and why: github.com / gitlab.com (repo traffic analytics
+# expose fetched paths), huggingface.co (Spaces are user-runnable logging web apps),
+# readthedocs.io (project-controlled subdomains). Add any of these yourself with
+# /web-safety:allow <host> if you accept the residual.
+#
+# Being on this list ONLY downgrades an ASK during the armed 5-minute window. It
+# NEVER overrides a HARD URL block (SSRF / IP-literal / credentials-in-URL /
+# dangerous scheme) and NEVER exempts an UPLOAD (curl -d/-F/-T/--json) to the host.
+#
+# KNOWN RESIDUAL (not closed here): a redirect FROM an allowlisted host to an
+# attacker host is not re-screened (the guard sees only the initial URL) — an open
+# redirect on a listed host would launder egress. The hosts below are static/
+# first-party without a known general open redirect; post-redirect re-screening is
+# a tracked follow-up.
+#
+# FORMAT: identical to url-allowlist.txt — one registrable host per line, '#'
+# comments, blank lines ignored, lowercased + whitespace-stripped. Matching is
+# SUFFIX with a LABEL BOUNDARY: an entry covers itself and its subdomains ONLY, so
+# a DIFFERENT registrable suffix must be listed SEPARATELY — githubusercontent.com
+# does NOT cover github.com or *.github.io.
+#
+# Override: extend via url-allowlist.txt (/web-safety:allow <host>). Disable this
+# whole default layer with WEB_SAFETY_DEFAULT_ALLOWLIST_DISABLE=1.
+
+# --- code / raw-file hosting (static content delivery only) ---
+githubusercontent.com
+
+# --- preprint / academic ---
+arxiv.org
+openreview.net
+
+# --- major AI vendors (first-party, org-controlled) ---
+anthropic.com
+openai.com
+
+# --- language / ecosystem (first-party, org-controlled) ---
+python.org

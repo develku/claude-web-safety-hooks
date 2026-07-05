@@ -148,6 +148,22 @@ host_in_list() {
   return 1
 }
 
+# host_in_any_list <host> <file1> [file2 ...] — true (0) if <host> matches (via
+# host_in_list's equals-or-subdomain rule) in ANY of the listed files. Missing or
+# empty-path files are skipped (host_in_list returns 1 for a nonexistent path).
+# Pure OR over host_in_list — no parsing logic duplicated. Used by the egress
+# guard to layer a plugin-shipped default allowlist under the user's
+# url-allowlist.txt (a match in EITHER exempts the host).
+host_in_any_list() {
+  local host="$1"; shift
+  local f
+  for f in "$@"; do
+    [ -n "$f" ] || continue
+    host_in_list "$host" "$f" && return 0
+  done
+  return 1
+}
+
 # is_fetch_command <command-string> — true (0) if the command invokes a tool whose
 # normal job is to fetch remote web content TO STDOUT (curl/wget/aria2c, HTTPie by
 # arg-shape, or a text browser). This is the Layer 8 routing predicate: a TRUE
