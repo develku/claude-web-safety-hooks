@@ -11,6 +11,8 @@ How to customise the scanner without forking it.
 | `WEB_SAFETY_CONFIG_DIR` | `~/.claude/hooks` | Where the audit log, blocklist, and allowlist live. Persists across plugin updates |
 | `CLAUDE_PLUGIN_ROOT` | (set by Claude Code) | Plugin install location — scripts auto-resolve sibling paths from here. Don't set manually |
 | `CLAUDE_SESSION_ID` | `$PPID` fallback | Scopes `/tmp/web-safety-session-*` files per Claude session. Set automatically by recent Claude Code versions. Override only for testing (each unique value = isolated state). |
+| `WEB_SAFETY_DEFAULT_ALLOWLIST_DISABLE` | `0` | `1` disables the plugin-shipped Layer-6 default allowlist (`scripts/web-safety-default-allowlist.txt`), falling back to user-file-only exemption. See "Layer 6" below. |
+| `WEB_SAFETY_SUGGEST_THRESHOLD` | `3` | Number of armed-window asks to the **same** host before the guard appends a one-shot `/web-safety:allow <host>` hint to the confirmation. Never auto-adds. |
 
 Example — disable Layer 5 for a single session:
 
@@ -27,7 +29,7 @@ export WEB_SAFETY_CONFIG_DIR="$HOME/Library/Mobile Documents/com~apple~CloudDocs
 
 ## URL allowlist
 
-`$WEB_SAFETY_CONFIG_DIR/url-allowlist.txt` — one domain per line. Comments start with `#`. Suffix-matched: `github.com` matches `api.github.com` and `raw.githubusercontent.com`.
+`$WEB_SAFETY_CONFIG_DIR/url-allowlist.txt` — one domain per line. Comments start with `#`. Suffix-matched **with a label boundary**: `github.com` matches `github.com` and `api.github.com`, but **not** `raw.githubusercontent.com` (a different registrable suffix) or `*.github.io` — each registrable suffix must be listed separately.
 
 ```
 # trusted internal docs + public read-only sources
@@ -190,13 +192,16 @@ No LLM calls. No API tokens beyond the `systemMessage` Claude reads from the hoo
 | Setting | Effect |
 |---|---|
 | `WEB_SAFETY_EGRESS_GUARD_DISABLE=1` | Kill switch — the guard defers unconditionally |
-| `url-allowlist.txt` (reused) | If every host extracted from an egress command suffix-matches an allowlist entry, the command is exempt (no confirmation). A command with no extractable host (e.g. host hidden in a `python -c` variable) is treated as untrusted and still escalates. **Use full registrable domains** (`api.example.com`, `example.com`) — never a bare public suffix like `com` or `io`, which would suffix-match and exempt every host under it. |
+| Shipped default allowlist | `scripts/web-safety-default-allowlist.txt` — a small, conservative set of trusted egress destinations (`githubusercontent.com`, `arxiv.org`, `openreview.net`, `anthropic.com`, `openai.com`, `python.org`) checked **in addition to** your `url-allowlist.txt`, so armed-window research fetches to obviously-trusted hosts stop prompting out of the box. **Egress-guard only** — it does not affect the URL pre-screen (Layer 1). Membership is a security decision, not a reputation list: a host qualifies only if an attacker who controls a resource there cannot read back request query/path/body (finalized by cross-model DCA `20260705T195623`). Deliberately excludes `github.com`/`gitlab.com` (repo traffic analytics), `huggingface.co` (Spaces log requests), `readthedocs.io` (project-controlled subdomains) — add any yourself with `/web-safety:allow`. Disable the whole layer with `WEB_SAFETY_DEFAULT_ALLOWLIST_DISABLE=1`. |
+| `url-allowlist.txt` (reused) | If every host extracted from an egress command suffix-matches an allowlist entry (default **or** user file), the command is exempt (no confirmation). A command with no extractable host (e.g. host hidden in a `python -c` variable) is treated as untrusted and still escalates. **Use full registrable domains** (`api.example.com`, `example.com`) — never a bare public suffix like `com` or `io`, which would suffix-match and exempt every host under it. |
+| One-shot allowlist suggestion | After `WEB_SAFETY_SUGGEST_THRESHOLD` (default 3) asks to the **same** host in a session, the confirmation gains a one-line `/web-safety:allow <host>` hint. It **never** auto-adds — a single injected+approved fetch to an attacker host must never become permanently trusted, so the human always decides. |
 
 - **Channels (v7.5+):** the guard runs on both the `Bash` matcher and the web-fetch matcher (`WebFetch`/`WebSearch`/MCP web tools). On the web channel, an armed outbound fetch to a non-allowlisted host is escalated; it fails closed if the destination field can't be parsed.
 - **Upload-aware exemption (v7.5+):** the allowlist exempts *transfers to* a trusted host, but **not uploads** — a `curl`/`wget` carrying data (`-d`/`--data*`/`-F`/`-T`/`--upload-file`/`--json`/wget `--post-*`/`--body-*`) to an allowlisted host still escalates, because exfil to a trusted host is still exfil. `scp`/`rsync` transfers to an allowlisted host stay exempt.
 - **Arming window:** 300s (matches the scanner's `SESSION_WINDOW`), keyed to a HIGH detection in the same session. Not independently configurable.
 - **Posture:** soft-block — the guard returns `permissionDecision:"ask"`, surfacing a confirmation dialog; it never hard-denies. The injected instruction cannot self-approve egress; you decide.
 - **Fail-open:** unlike the scanner (which fails closed), the egress guard fails *open* on internal error (missing `jq`, unparseable input, unreadable arm-state) so a guard bug cannot block every outbound command in a flagged session. The normal armed+egress decision is already safe (`ask`).
+- **Known residual — redirects (v8.3+):** the guard screens the *initial* fetch URL only; a redirect **from** an allowlisted host to an attacker host is not re-screened (a `curl -L` / WebFetch follows it to a final host the PreToolUse hook never sees). The shipped default hosts are static/first-party without a known general open redirect, but post-redirect re-screening is a tracked follow-up. If you add a host with an open-redirect endpoint to your allowlist, you inherit this risk.
 
 ## Limitations
 

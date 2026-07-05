@@ -2,6 +2,78 @@
 
 All notable changes to this project. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [8.3.0] — 2026-07-05
+
+**Layer 6 default allowlist — end the armed-window fetch flood.** The outbound
+exfiltration guard's only exemption, `url-allowlist.txt`, shipped empty. So once a
+HIGH injection armed Layer 6 (which research on AI/security topics does readily —
+papers and blogs about injection legitimately contain the scanner's trigger
+strings), *every* subsequent fetch to a non-allowlisted host escalated to an
+interactive `ask` for 300s. A real session fired **200+ `EGRESS-ASK-FETCH` events**
+(15+ in 60s), every one to an obviously-trusted research host (arxiv, github,
+openai, anthropic, LangChain docs). The v8.1.0 WebSearch downgrade fixed the
+*search* channel; the flood simply moved to the *fetch* channel.
+
+Root cause: a fail-closed fetch guard whose sole escape hatch ships empty and
+nobody populates. Fix: layer a small, plugin-shipped **default** allowlist under
+the user file so trusted research fetches defer out of the box — without touching
+arming, hard blocks, or the upload carve-out.
+
+Approach + host-list membership finalized via cross-model DCA
+`20260705T195623_web-safety-default-allowlist-8_3_0.md` (leg: gpt-5.5, thread
+`019f31b9-5a52-7870-b340-529b728f5ffd`; verdict REFINED-AND-PROCEED). The DCA
+tightened the list: membership is a **security** decision (a host qualifies only if
+an attacker who controls a resource there cannot read back request query/path/body),
+not a reputation list.
+
+### Added
+
+- **`scripts/web-safety-default-allowlist.txt`** — shipped Layer-6 default allowlist:
+  `githubusercontent.com`, `arxiv.org`, `openreview.net`, `anthropic.com`,
+  `openai.com`, `python.org`. Checked **in addition to** the user's
+  `url-allowlist.txt`. **Egress-guard scope only** — not consulted by the Layer-1
+  URL pre-screen (`web-safety-approve.sh` is byte-identical). Deliberately
+  **excludes** `github.com`/`gitlab.com` (repo traffic analytics expose fetched
+  paths), `huggingface.co` (user-runnable Spaces log requests), and `readthedocs.io`
+  (project-controlled subdomains) — each an attacker-readable metadata channel;
+  add any yourself with `/web-safety:allow`.
+- **`host_in_any_list <host> <file…>`** in `web-safety-lib.sh` — multi-file OR
+  wrapper over the existing `host_in_list` (no parsing logic duplicated); a match in
+  the default **or** user file exempts the host.
+- **`WEB_SAFETY_DEFAULT_ALLOWLIST_DISABLE=1`** — disable the whole default layer
+  (fall back to user-file-only).
+- **One-shot allowlist suggestion** — after `WEB_SAFETY_SUGGEST_THRESHOLD` (default
+  3) armed-window asks to the **same** host, the confirmation reason gains a one-line
+  `/web-safety:allow <host>` hint. **Never auto-adds** — a single injected+approved
+  fetch to an attacker host must never become permanent trust, and an attacker could
+  otherwise manufacture repeated asks until their relay is trusted; the human decides.
+- **Egress notify rate-limit** — the guard's desktop notification is now throttled to
+  one per 5s via its own `/tmp/web-safety-egress-last-notify` (mirrors the scanner's
+  guard; the JSON decision and audit-log line stay per-event).
+
+### Changed
+
+- `host_allowlisted()` in `web-safety-egress.sh` now consults the default **and**
+  user allowlist. The upload-aware carve-out and `ws-invalid-authority` guard are
+  unchanged and still sit above the exemption.
+- `docs/tuning.md` — corrected the allowlist matching description (it wrongly claimed
+  `github.com` matches `raw.githubusercontent.com`; label-boundary suffix matching
+  does not — each registrable suffix must be listed separately). Documented the
+  default allowlist, the suggestion threshold, and the redirect residual.
+
+### Known residual
+
+- A redirect **from** an allowlisted host to an attacker host is not re-screened (the
+  guard sees only the initial URL; `curl -L`/WebFetch follow it). The shipped default
+  hosts are static/first-party without a known general open redirect; post-redirect
+  re-screening is a tracked follow-up.
+
+### Tests
+
+- Egress suite → **115 cases** (+19: `host_in_any_list` unit, default-allowlist
+  layering, DCA-exclusion lock for `github.com`, kill switch, upload-still-asks,
+  one-shot suggestion, notify rate-limit). Total now **7 suites · 302 cases**.
+
 ## [8.2.0] — 2026-06-26
 
 **Layer 8: Bash-fetched web-content scanning.** Closes a full bypass. The Layer 2–5
