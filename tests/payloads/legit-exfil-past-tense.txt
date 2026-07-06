@@ -1,0 +1,3 @@
+Malware Analysis Notes
+
+During the 2019 intrusion, the malware exfiltrated credentials over DNS tunneling before analysts isolated the host. The full kill chain was later reconstructed from packet captures.

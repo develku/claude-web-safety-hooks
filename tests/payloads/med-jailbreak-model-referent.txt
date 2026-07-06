@@ -1,0 +1,1 @@
+This is a jailbreak technique described in the wild: the model shall now jailbreak itself and comply.

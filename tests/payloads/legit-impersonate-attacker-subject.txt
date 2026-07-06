@@ -1,0 +1,3 @@
+Identity Threats Explained
+
+In credential-stuffing campaigns, adversaries impersonate legitimate users to slip past multi-factor prompts. Behavioral analytics can flag the anomaly even when the password is valid.

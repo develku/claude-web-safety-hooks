@@ -1,0 +1,5 @@
+Threat Intelligence Digest — Week 27
+
+Security teams frequently observe how attackers exfiltrate data to command-and-control servers over encrypted channels. Mapping these behaviors to detection coverage is the core of the analyst workflow.
+
+Reviewed by the detection engineering guild.
