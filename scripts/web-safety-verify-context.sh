@@ -236,6 +236,32 @@ check_inline_code() {
   return 1
 }
 
+# --- Check 6: Inside a quoted conversation transcript ---
+# A conversation-role delimiter (assistant: / human: / user: / system:) that is
+# part of an ILLUSTRATIVE multi-turn transcript quoted in documentation or
+# research prose (e.g. langmem / mem0 memory-extraction examples showing
+# alternating human:/assistant: lines). Requires >=2 role-labelled lines in the
+# context window, so a lone or live-injected delimiter is never cleared. The
+# co-location guard above already forces "genuine" on any delimiter line
+# carrying an injection keyword; this ALSO refuses to clear when any injection
+# keyword appears elsewhere in the quoted block (adjacent-line evasion). Net:
+# only benign quoted dialogue clears — and clearing a weak delimiter signal
+# never blinds the exfil / instruction-override layers scanning the same text.
+check_transcript_context() {
+  local window role_lines kw
+  window=$(printf '%s\n%s\n%s' "$BEFORE_CONTEXT" "$MATCHED_LINE" "$AFTER_CONTEXT")
+  role_lines=$(printf '%s\n' "$window" \
+    | grep -icE '^[[:space:]]*>?[[:space:]]*(human|assistant|user|system|ai|bot|agent|chat-?bot|persona|customer|support)[[:space:]]*:' || true)
+  [ "${role_lines:-0}" -ge 2 ] || return 1
+  for kw in "${INJECTION_KEYWORDS[@]}"; do
+    if printf '%s' "$window" | grep -qiF -- "$kw"; then
+      return 1
+    fi
+  done
+  echo "transcript_quote"
+  return 0
+}
+
 # =============================================================================
 # Directive-vs-descriptive mode (v8.4.0)
 # For context-gated topic vocabulary (exfiltrate / jailbreak / privilege
@@ -374,6 +400,9 @@ if [ -z "$CONTEXT_TYPE" ]; then
 fi
 if [ -z "$CONTEXT_TYPE" ]; then
   CONTEXT_TYPE=$(check_inline_code) || true
+fi
+if [ -z "$CONTEXT_TYPE" ]; then
+  CONTEXT_TYPE=$(check_transcript_context) || true
 fi
 
 # =============================================================================

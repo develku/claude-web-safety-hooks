@@ -2,6 +2,32 @@
 
 All notable changes to this project. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [8.7.0] — 2026-07-06
+
+**Transcript-delimiter false positive — stop killing research subagents on quoted chat
+logs.** Conversation-role delimiters (`assistant: `, `human: `, `user: `, `system: you
+are`) are `MED_GENERIC_DELIMITERS`, and a MEDIUM inside a subagent kills it (Layer 7).
+AI-memory research pages (langmem, mem0) quote chat transcripts full of `human:` /
+`assistant:` lines, so a research fan-out kept losing subagents to a pure *structural*
+false positive (`web-safety.log`, 2026-07-06: `assistant: ` killed subagents on
+langmem/mem0 docs). The structural verifier already cleared these inside a code fence /
+YAML / JSON / HTML / inline code, but not a plain quoted transcript. New
+**`check_transcript_context`** in `web-safety-verify-context.sh` clears a role-delimiter
+to `fp` when it is part of an illustrative multi-turn transcript — **only** when the
+±20-line window holds ≥2 role-labelled lines AND none of the 12 co-location injection
+keywords appears anywhere in the block (adjacent-line evasion guard). The pre-existing
+co-location guard (an injection keyword on the *matched* line → `genuine`) is unchanged,
+and clearing the weak delimiter signal never blinds the independent exfil /
+instruction-override / prompt-extraction / role-manipulation layers scanning the same
+normalized text — a live injection disguised as a transcript is still caught there
+(verified: `med-transcript-injection-colocated` stays MEDIUM). An adversarial red-team
+found no evasion beyond a low-harm behaviour-nudge, which is the FP class being addressed;
+this mirrors the existing code-fence/YAML clearance philosophy (clear a weak signal when
+structurally benign, never disable detection). Two new fixtures. Scanner corpus 77 → 79
+(now 7 suites · 334 cases). **Deferred** (separate scanner-side mechanisms, also seen
+killing rev3 research subagents): the `stop being` role-manipulation FP and the mixed
+Cyrillic/Latin homoglyph FP.
+
 ## [8.6.0] — 2026-07-06
 
 **Mode-conditional egress arming — end the research-fan-out outbound ask-flood.** A

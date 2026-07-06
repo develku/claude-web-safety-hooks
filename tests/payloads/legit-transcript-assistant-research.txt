@@ -1,0 +1,15 @@
+# LangMem: Hot-Path Memory Extraction
+
+LangMem writes durable facts from a conversation while it is still in progress.
+Consider this short exchange between a person and the memory manager:
+
+human: I prefer dark-roast coffee and I usually take my meetings after 10am.
+assistant: Noted — I'll keep in mind that you like dark roast and prefer late-morning meetings.
+
+From that single turn the manager extracts two semantic memories and stores them
+in the LangGraph store. The extraction step reads the transcript, picks out the
+stable preferences, and saves them so a later reply can recall how the fact was
+learned. Episodic memories keep the exchange itself for provenance.
+
+In the hot-path variant the memory tool is called mid-conversation; in the
+background variant the same extraction runs after the turn has completed.

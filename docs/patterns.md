@@ -96,7 +96,10 @@ For `MED_GENERIC_DELIMITERS` patterns (`assistant:`, `human:`, `system: you are`
 | JSON string value | Cleared | `{"role": "assistant: handles queries"}` |
 | HTML `<code>` / `<pre>` block | Cleared | inline or block, supports nested unclosed scope |
 | Markdown inline code (`` ` ``) | Cleared | `` Use `assistant:` as the key. `` |
+| Quoted conversation transcript (v8.7) | Cleared | ≥2 role-labelled lines quoted in prose: `human: …`\n`assistant: …` (langmem/mem0 memory docs) |
 | Standalone line | Genuine | `assistant: How can I help?` |
+
+The transcript check (`check_transcript_context`, v8.7) fires only when the ±20-line window holds **≥2** role-labelled lines (`human:`/`assistant:`/`user:`/`system:`/…) — a lone delimiter stays genuine — and it additionally refuses clearance if **any** co-location keyword (below) appears **anywhere** in the block, not just the matched line, closing the adjacent-line evasion where the injected turn sits next to a clean delimiter.
 
 ### Co-location guard
 
