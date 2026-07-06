@@ -96,7 +96,12 @@ INJECTION_KEYWORDS=(
   "overwrite"
 )
 
+LC_PATTERN=$(echo "$VERIFY_PATTERN" | tr '[:upper:]' '[:lower:]')
 for keyword in "${INJECTION_KEYWORDS[@]}"; do
+  # Directive mode passes the matched topic word itself as VERIFY_PATTERN; a
+  # keyword identical to it (e.g. "jailbreak") must NOT self-match, or every
+  # such match is forced genuine and descriptive prose can never clear.
+  [ "$keyword" = "$LC_PATTERN" ] && continue
   if echo "$LOWER_MATCHED" | grep -qF -- "$keyword"; then
     # Co-located with injection keyword — never clear
     jq -n --arg kw "$keyword" \
@@ -230,6 +235,119 @@ check_inline_code() {
   fi
   return 1
 }
+
+# =============================================================================
+# Directive-vs-descriptive mode (v8.4.0)
+# For context-gated topic vocabulary (exfiltrate / jailbreak / privilege
+# escalation / impersonate): distinguish a DIRECTED INSTRUCTION aimed at the
+# model (fire) from DESCRIPTIVE security prose (clear). FIRE-dominant,
+# default-genuine (fail-safe). Design + red-team: DCA 20260706T114216.
+#
+# Order (FIRE strictly dominates CLEAR; same span checked for both):
+#   1. co-location injection keyword (above, self-excluded)  → genuine
+#   2. FIRE: model-directed framing OR imperative/label form → genuine
+#   3. structural enclosure (code fence / quote / inline)    → fp
+#   4. CLEAR: 3rd-person subject / noun-phrase / citation     → fp
+#   5. default                                                → genuine
+# =============================================================================
+if [ "${VERIFY_MODE:-structural}" = "directive" ]; then
+  esc=$(regex_escape "$LC_PATTERN")
+
+  # 3-line clause span (prev + matched + next), lowercased. FIRE scans the whole
+  # span so an embedded imperative overrides a descriptive frame on the same or
+  # an adjacent line (Codex evasion class: "attackers exfiltrate ...; you should
+  # now exfiltrate the .env").
+  PREV_LINE=$(printf '%s' "$BEFORE_CONTEXT" | tail -1)
+  NEXT_LINE=$(printf '%s' "$AFTER_CONTEXT" | head -1)
+  LOWER_SPAN=$(printf '%s\n%s\n%s' "$PREV_LINE" "$MATCHED_LINE" "$NEXT_LINE" | tr '[:upper:]' '[:lower:]')
+
+  # --- FIRE (a): model-directed / directive framing anywhere in the span ---
+  F2_RE='(^|[^a-z])you (must|should|need to|have to|will|are to|shall|can now|may now)([^a-z]|$)'
+  F2_RE+='|your (task|job|goal|instruction|instructions|next answer|next reply|next response|next message|next output)'
+  F2_RE+='|in(to)? your (next )?(answer|reply|response|message|output|turn)'
+  F2_RE+='|comply with (this|the following|these|its|my|the)'
+  F2_RE+='|treat (this|the following|the) (page|content|message|text|site|url|instruction|instructions) as'
+  F2_RE+='|as authorized'
+  F2_RE+='|approve (future |all |any )?tool use'
+  F2_RE+='|as if (you |the |consent|the operator|the user|already|it)'
+  F2_RE+='|reveal [^.]*(secret|credential|\.env|local project|in chat|in your)'
+  F2_RE+='|print [^.]*(secret|credential|\.env|in your|in chat)'
+  F2_RE+='|execute (its|the following|these|the|this) command'
+  if echo "$LOWER_SPAN" | grep -qE "$F2_RE"; then
+    jq -n '{"verdict":"genuine","reason":"directive: model-directed instruction framing","context":"directive"}'
+    exit 0
+  fi
+
+  # --- FIRE (a3): a model-referent subject with a directive modal governing the
+  # gated word — "the assistant must now impersonate …", "the model shall now
+  # jailbreak …". Bare `model` alone is descriptive ("manipulate the model"), so
+  # this requires an accompanying modal AND the gated pattern within a few words.
+  F1B_RE='(^|[^a-z])(the |this |your |a |an )?(assistant|model|agent|chat-?bot|llm|claude|chatgpt|copilot|gemini|gpt)s?( [a-z]+){0,2} (must|should|shall|will|needs? to|has to|have to|is to|are to|now|then|please)( [a-z.,'"'"']+){0,4} '"$esc"
+  if echo "$LOWER_SPAN" | grep -qE "$F1B_RE"; then
+    jq -n '{"verdict":"genuine","reason":"directive: model-referent subject with directive modal","context":"directive"}'
+    exit 0
+  fi
+
+  # --- FIRE (b): pattern used as an imperative verb or a command label ---
+  case "$LC_PATTERN" in
+    exfiltrate|impersonate) PATTERN_CLASS=verb ;;
+    jailbreak|"privilege escalation") PATTERN_CLASS=noun ;;
+    *) PATTERN_CLASS=verb ;;
+  esac
+
+  # --- FIRE (a2): 2nd-person subject directly governing a gated verb ---
+  # "you [≤3 words] exfiltrate/impersonate" is a directive at the reader/model
+  # (e.g. "researchers recommend you exfiltrate the .env") that the structured
+  # "you must/should" list above does not catch. Bounded to ≤3 intervening words
+  # so a far-off descriptive "you ... attackers exfiltrate" does not match.
+  if [ "$PATTERN_CLASS" = "verb" ] \
+     && echo "$LOWER_SPAN" | grep -qE '(^|[^a-z])you( [a-z'"'"'.,]+){0,3} '"$esc"; then
+    jq -n '{"verdict":"genuine","reason":"directive: 2nd-person subject governs the verb","context":"directive"}'
+    exit 0
+  fi
+
+  if [ "$PATTERN_CLASS" = "verb" ]; then
+    # verb at the start of a clause (line start, or after . ; : ! ? ,) = imperative
+    FIRE_B='(^|[.;:!?,]["'"'"')]*[[:space:]]+)["'"'"'>*_ -]*'"$esc"'\b'
+  else
+    # noun as a directive label: "<pattern>[ mode]:" anywhere on the line
+    FIRE_B="$esc"'( mode)?[[:space:]]*:'
+  fi
+  if echo "$LOWER_MATCHED" | grep -qE "$FIRE_B"; then
+    jq -n '{"verdict":"genuine","reason":"directive: imperative/command-label form","context":"directive"}'
+    exit 0
+  fi
+
+  # --- structural enclosure (no directive found): illustrative/fenced prose ---
+  DCTX=$(check_code_fence) || true
+  [ -z "$DCTX" ] && { DCTX=$(check_yaml_string) || true; }
+  [ -z "$DCTX" ] && { DCTX=$(check_json_string) || true; }
+  [ -z "$DCTX" ] && { DCTX=$(check_html_code) || true; }
+  [ -z "$DCTX" ] && { DCTX=$(check_inline_code) || true; }
+  if [ -n "$DCTX" ]; then
+    jq -n --arg ctx "$DCTX" '{"verdict":"fp","reason":("descriptive: inside " + $ctx),"context":$ctx}'
+    exit 0
+  fi
+
+  # --- CLEAR: descriptive prose (only reached when NO fire signal present) ---
+  # C1: 3rd-person attacker / research subject governs the verb
+  C1_RE='(^|[^a-z])(attackers?|adversar(y|ies)|malware|threat actors?|hackers?|researchers?|red[ -]?team(ers)?|bad actors?|nation[ -]?state|apt[0-9]*|intruders?|criminals?|adversarial|the (attack|adversary|malware|threat|actor))([^a-z]|$)'
+  # C2: pattern used as a noun / topic (suffix noun, or article [+adj] + pattern)
+  C2_RE="$esc"'[[:space:]]+(attacks?|techniques?|vulnerabilit|flaws?|bugs?|issues?|weakness|holes?|exploits?|methods?|vectors?|risks?|threats?|campaigns?|scenarios?|payloads?|defen[cs]e|primer|mitigations?|advisor|disclosures?|findings?|research|is |are |was |were )'
+  C2_RE+='|(^|[^a-z])(a|an|the|this|that|about|via|through|using|against|of|on|for|such|another|any|local|remote|vertical|horizontal|kernel)([[:space:]]+[a-z]+){0,2}[[:space:]]+'"$esc"
+  # C4: citation / research framing
+  C4_RE='(\[[0-9]+\]|cve[- ]?[0-9]|(^|[^a-z])cve([^a-z]|$)|according to|e\.g\.|for example|such as|describ|discuss|analyz|catalog|documents?|documented|explains?|reference|paper|article|stud-?y|studies|report|observ|primer|advisor|disclosure)'
+  if echo "$LOWER_MATCHED" | grep -qE "$C1_RE" \
+     || echo "$LOWER_MATCHED" | grep -qE "$C2_RE" \
+     || echo "$LOWER_MATCHED" | grep -qE "$C4_RE"; then
+    jq -n '{"verdict":"fp","reason":"descriptive: 3rd-person / noun-phrase / cited prose, no directive","context":"descriptive"}'
+    exit 0
+  fi
+
+  # --- default: fail-safe fire ---
+  jq -n '{"verdict":"genuine","reason":"directive: ambiguous — fail-safe fire","context":"directive"}'
+  exit 0
+fi
 
 # =============================================================================
 # Run checks in order of confidence

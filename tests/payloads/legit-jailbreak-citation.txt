@@ -1,0 +1,3 @@
+Literature Review: LLM Safety
+
+Reference [12] describes jailbreak techniques used against production language models, and catalogs the patterns researchers submitted during red-team studies.

@@ -747,7 +747,9 @@ MED_JAILBREAK=(
   "jail-break"
   "dan mode"
   "d.a.n. mode"
-  "prompt injection"
+  # "prompt injection" moved to LOW_TOPIC_VOCAB (v8.4.0): a pure topic label,
+  # never the attack mechanism — both models agreed in DCA 20260706T111826.
+  # A real injection under this label still hits override/Layer-6 patterns.
   "developer mode enabled"
   "developer mode activated"
   "developer mode on"
@@ -1113,6 +1115,16 @@ LOW_MARKDOWN_IMAGES=(
   "![image](http"
 )
 
+# --- Security topic vocabulary (notify-only labels, never a mechanism) ---
+# Downgraded from MEDIUM in v8.4.0: these are the NAMES of attack classes, not
+# the attacks. They saturate legit security/AI research prose and armed the
+# egress guard during fan-out research (DCA 20260706T111826). A real attack
+# under one of these labels still carries its own imperative/override payload,
+# caught by MED_INSTRUCTION_OVERRIDE / MED_ROLE_MANIPULATION / Layer 6.
+LOW_TOPIC_VOCAB=(
+  "prompt injection"
+)
+
 # =============================================================================
 # Batch pattern matching (performance optimized, bash 3.2 compatible)
 # Uses temp pattern files + grep -Ff for 3 calls per severity
@@ -1142,7 +1154,7 @@ for p in "${MED_ALL[@]}"; do
   echo "$p" | tr '[:upper:]' '[:lower:]'
 done > "$TMP_DIR/med.pat"
 
-for p in "${LOW_HTML_CSS[@]}" "${LOW_MARKDOWN_IMAGES[@]}"; do
+for p in "${LOW_HTML_CSS[@]}" "${LOW_MARKDOWN_IMAGES[@]}" "${LOW_TOPIC_VOCAB[@]}"; do
   echo "$p" | tr '[:upper:]' '[:lower:]'
 done > "$TMP_DIR/low.pat"
 
@@ -1212,7 +1224,7 @@ if [ "$LOW_EC" -gt 1 ]; then
 else
   LOW_MATCHES=$(printf '%s' "$LOW_OUT" | awk 'NF && !seen[$0]++')
 fi
-ALL_LOW_PATTERNS=("${LOW_HTML_CSS[@]}" "${LOW_MARKDOWN_IMAGES[@]}")
+ALL_LOW_PATTERNS=("${LOW_HTML_CSS[@]}" "${LOW_MARKDOWN_IMAGES[@]}" "${LOW_TOPIC_VOCAB[@]}")
 while IFS= read -r match; do
   [ -z "$match" ] && continue
   for p in "${ALL_LOW_PATTERNS[@]}"; do
@@ -1345,6 +1357,90 @@ for pattern in "${LEET_PATTERNS[@]}"; do
     fi
   fi
 done
+
+# =============================================================================
+# Context-gating pre-verdict reclassification (v8.4.0)
+# The topic-vocabulary patterns exfiltrate / jailbreak / privilege escalation /
+# impersonate stay as detection patterns (each has a real attack form the bare
+# word is the only catch for — DCA 20260706T111826), but they saturate legit
+# security/AI research prose and armed the egress guard during fan-out research.
+# Route each such match through the directive verifier BEFORE the tier verdict +
+# arming: a DIRECTED INSTRUCTION to the model keeps its tier; DESCRIPTIVE prose
+# is dropped (clean + a [CONTEXT-CLEARED] audit line, no arm/halt/notify). This
+# runs before the HIGH/MED verdict so it also gates HIGH `exfiltrate`, which the
+# structural Layer-5 gate (HIGH==0 only) never sees. ALL occurrences are checked:
+# KEEP on ANY genuine, CLEAR only when ALL are descriptive. Fail-safe: verifier
+# error / timeout / ambiguity → genuine (kept). Design + red-team: DCA 20260706T114216.
+# Disable with: CONTEXT_GATE_ENABLED=false
+# =============================================================================
+CONTEXT_GATE_ENABLED="${CONTEXT_GATE_ENABLED:-true}"
+CTXGATE_VERIFIER="$HOOKS_DIR/web-safety-verify-context.sh"
+CONTEXT_GATED_PATTERNS=("exfiltrate" "jailbreak" "privilege escalation" "impersonate")
+
+if [ "$CONTEXT_GATE_ENABLED" = "true" ] && [ -x "$CTXGATE_VERIFIER" ] \
+   && { [ ${#FOUND_HIGH[@]} -gt 0 ] || [ ${#FOUND_MEDIUM[@]} -gt 0 ]; }; then
+
+  ctxgate_is_gated() {  # $1 = lowercased pattern → 0 if context-gated
+    local p="$1" g
+    for g in "${CONTEXT_GATED_PATTERNS[@]}"; do [ "$p" = "$g" ] && return 0; done
+    return 1
+  }
+
+  # Returns 0 = CLEAR (EVERY located occurrence is explicitly descriptive);
+  # 1 = KEEP. KEEP is the fail-safe for every uncertain case: cannot locate the
+  # pattern, MORE occurrences than we can verify (cap), a verifier timeout/crash
+  # (perl's SIGALRM kill leaves EMPTY stdout — jq on empty input exits 0, so this
+  # is NOT caught by a `||` on the pipeline; guarded explicitly below), a parse
+  # failure, or ANY non-"fp" verdict. Only an explicit "fp" counts as clearing
+  # evidence. Fixes power-code-reviewer Findings 1 (cap dropped evidence) and 2
+  # (empty verdict scored as clear).
+  CTXGATE_OCC_CAP=20
+  ctxgate_should_clear() {
+    local lc_p="$1" lines n verdict raw count
+    lines=$(echo "$TOOL_OUTPUT" | grep -inF -- "$lc_p" 2>/dev/null | cut -d: -f1)
+    [ -z "$lines" ] && return 1                        # cannot locate → KEEP
+    count=$(printf '%s\n' "$lines" | grep -c .)
+    [ "$count" -gt "$CTXGATE_OCC_CAP" ] && return 1    # too many to verify all → KEEP
+    for n in $lines; do
+      raw=$(echo "$TOOL_OUTPUT" | \
+        VERIFY_MODE=directive VERIFY_PATTERN="$lc_p" VERIFY_LINE_NUM="$n" \
+        perl -e 'alarm 1; exec { $ARGV[0] } @ARGV' "$CTXGATE_VERIFIER" 2>/dev/null \
+        || echo '{"verdict":"genuine"}')
+      verdict=$(echo "$raw" | jq -r '.verdict // "genuine"' 2>/dev/null)
+      [ -z "$verdict" ] && verdict=genuine             # empty/timeout/unparseable → genuine
+      [ "$verdict" != "fp" ] && return 1               # any non-"fp" occurrence → KEEP
+    done
+    return 0                                           # every occurrence explicitly fp → CLEAR
+  }
+
+  ctxgate_log_clear() {  # $1 = tier label, $2 = original-cased pattern
+    local h
+    h=$(echo "$TOOL_OUTPUT" | shasum -a 256 | cut -d' ' -f1)
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] [CONTEXT-CLEARED] tool=${TOOL_NAME} ${TOOL_URL:+url=${TOOL_URL} }tier=${1} pattern=\"${2}\" reason=\"descriptive prose, no directive to model\" hash=${h:0:12}" >> "$LOG_FILE"
+  }
+
+  CTXGATE_NEW_HIGH=()
+  for p in "${FOUND_HIGH[@]}"; do
+    lc_p=$(echo "$p" | tr '[:upper:]' '[:lower:]')
+    if ctxgate_is_gated "$lc_p" && ctxgate_should_clear "$lc_p"; then
+      ctxgate_log_clear "HIGH" "$p"
+      continue
+    fi
+    CTXGATE_NEW_HIGH+=("$p")
+  done
+  FOUND_HIGH=("${CTXGATE_NEW_HIGH[@]}")
+
+  CTXGATE_NEW_MED=()
+  for p in "${FOUND_MEDIUM[@]}"; do
+    lc_p=$(echo "$p" | tr '[:upper:]' '[:lower:]')
+    if ctxgate_is_gated "$lc_p" && ctxgate_should_clear "$lc_p"; then
+      ctxgate_log_clear "MEDIUM" "$p"
+      continue
+    fi
+    CTXGATE_NEW_MED+=("$p")
+  done
+  FOUND_MEDIUM=("${CTXGATE_NEW_MED[@]}")
+fi
 
 # =============================================================================
 # Output based on highest severity
