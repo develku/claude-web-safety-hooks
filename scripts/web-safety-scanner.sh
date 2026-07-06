@@ -87,8 +87,14 @@ mkdir -p "$CONFIG_DIR" 2>/dev/null
 # Notification Configuration
 # =============================================================================
 LOG_FILE="$CONFIG_DIR/web-safety.log"
-RATE_LIMIT_FILE="/tmp/web-safety-scanner-last-notify"
-RATE_LIMIT_SECONDS=5
+# Notification dedup (v8.5.0): key the toast rate-limit on {severity + content-hash}
+# with a long window, REPLACING the old blunt 5s GLOBAL timer. The global timer both
+# (a) let a fan-out burst through when the same injected content was re-detected >5s
+# apart across N subagents (the 2026-07-06 flood), AND (b) wrongly muted DISTINCT
+# threats that happened within 5s. Content-keyed dedup collapses a genuine REPEAT of
+# the same content to one toast while never collapsing different content. Toast-ONLY:
+# the audit log, sanitize, subagent kill, and egress-arm are per-event and untouched.
+NOTIFY_DEDUP_WINDOW="${WEB_SAFETY_NOTIFY_DEDUP_WINDOW:-300}"
 
 # =============================================================================
 # Cross-tool correlation: track injection signals across tool calls
@@ -1375,7 +1381,30 @@ done
 # =============================================================================
 CONTEXT_GATE_ENABLED="${CONTEXT_GATE_ENABLED:-true}"
 CTXGATE_VERIFIER="$HOOKS_DIR/web-safety-verify-context.sh"
-CONTEXT_GATED_PATTERNS=("exfiltrate" "jailbreak" "privilege escalation" "impersonate")
+# Single source of truth: "<pattern>:<class>" (class ∈ verb|noun drives the
+# verifier's directive-form heuristics). BOTH the gate list (CONTEXT_GATED_PATTERNS,
+# matched by ctxgate_is_gated) and the pattern→class lookup (ctxgate_class) are DERIVED
+# from this one array — so a topic synonym cannot be gated without declaring its class,
+# and cannot drift out of sync with a hand-copied second list. This fixes the v8.4.0
+# gap where "privilege escalation" was gated but its same-array synonyms (MED_JAILBREAK
+# lines ~823-826: "elevated privileges"/"elevated permissions"/"admin privileges") were
+# not, leaking descriptive security-research prose to MEDIUM (incident 2026-07-06).
+# Coverage is enforced by the context-gate contract test in tests/run-tests.sh.
+# Scope note: gate ONLY research-topic nouns/verbs, NEVER directive-phrase patterns —
+# gating a pattern expands its CLEAR (suppression) path, and directive phrases are the
+# payload itself (false-negative risk). DCA 20260706T142401.
+CONTEXT_GATE_REGISTRY=(
+  "exfiltrate:verb"
+  "impersonate:verb"
+  "jailbreak:noun"
+  "privilege escalation:noun"
+  "elevated privileges:noun"
+  "elevated permissions:noun"
+  "admin privileges:noun"
+)
+CONTEXT_GATED_PATTERNS=()
+for _cg in "${CONTEXT_GATE_REGISTRY[@]}"; do CONTEXT_GATED_PATTERNS+=("${_cg%%:*}"); done
+unset _cg
 
 if [ "$CONTEXT_GATE_ENABLED" = "true" ] && [ -x "$CTXGATE_VERIFIER" ] \
    && { [ ${#FOUND_HIGH[@]} -gt 0 ] || [ ${#FOUND_MEDIUM[@]} -gt 0 ]; }; then
@@ -1384,6 +1413,14 @@ if [ "$CONTEXT_GATE_ENABLED" = "true" ] && [ -x "$CTXGATE_VERIFIER" ] \
     local p="$1" g
     for g in "${CONTEXT_GATED_PATTERNS[@]}"; do [ "$p" = "$g" ] && return 0; done
     return 1
+  }
+
+  ctxgate_class() {  # $1 = lowercased pattern → echo verb|noun from the registry
+    local p="$1" e
+    for e in "${CONTEXT_GATE_REGISTRY[@]}"; do
+      [ "${e%%:*}" = "$p" ] && { printf '%s' "${e##*:}"; return 0; }
+    done
+    printf 'verb'   # registry miss → verb (matches the verifier's own default)
   }
 
   # Returns 0 = CLEAR (EVERY located occurrence is explicitly descriptive);
@@ -1396,14 +1433,15 @@ if [ "$CONTEXT_GATE_ENABLED" = "true" ] && [ -x "$CTXGATE_VERIFIER" ] \
   # (empty verdict scored as clear).
   CTXGATE_OCC_CAP=20
   ctxgate_should_clear() {
-    local lc_p="$1" lines n verdict raw count
+    local lc_p="$1" lines n verdict raw count vclass
+    vclass=$(ctxgate_class "$lc_p")                    # registry-declared verb|noun
     lines=$(echo "$TOOL_OUTPUT" | grep -inF -- "$lc_p" 2>/dev/null | cut -d: -f1)
     [ -z "$lines" ] && return 1                        # cannot locate → KEEP
     count=$(printf '%s\n' "$lines" | grep -c .)
     [ "$count" -gt "$CTXGATE_OCC_CAP" ] && return 1    # too many to verify all → KEEP
     for n in $lines; do
       raw=$(echo "$TOOL_OUTPUT" | \
-        VERIFY_MODE=directive VERIFY_PATTERN="$lc_p" VERIFY_LINE_NUM="$n" \
+        VERIFY_MODE=directive VERIFY_PATTERN="$lc_p" VERIFY_CLASS="$vclass" VERIFY_LINE_NUM="$n" \
         perl -e 'alarm 1; exec { $ARGV[0] } @ARGV' "$CTXGATE_VERIFIER" 2>/dev/null \
         || echo '{"verdict":"genuine"}')
       verdict=$(echo "$raw" | jq -r '.verdict // "genuine"' 2>/dev/null)
@@ -1695,19 +1733,20 @@ send_notification() {
   local sound="$4"
   local subtitle="${5:-}"
 
-  # Rate limiting: skip if notified within RATE_LIMIT_SECONDS
-  if [ -f "$RATE_LIMIT_FILE" ]; then
-    local last_notify
-    last_notify=$(cat "$RATE_LIMIT_FILE" 2>/dev/null)
-    local now
-    now=$(date +%s)
-    if [ -n "$last_notify" ] && [ $((now - last_notify)) -lt "$RATE_LIMIT_SECONDS" ]; then
-      return 0
-    fi
+  # Content-aware dedup: collapse a REPEAT toast for the SAME {severity + content}
+  # within NOTIFY_DEDUP_WINDOW. Keyed on a hash of the scanned content so DIFFERENT
+  # content is never suppressed (unlike the old global 5s timer). Best-effort — every
+  # file op fails silent and never blocks the dispatch.
+  local chash key now last
+  chash=$(printf '%s' "$TOOL_OUTPUT" | shasum -a 256 2>/dev/null | cut -c1-16)
+  key="/tmp/web-safety-scanner-notify-${severity}-${chash:-none}"
+  now=$(date +%s)
+  if [ -f "$key" ]; then
+    last=$(cat "$key" 2>/dev/null)
+    case "$last" in ''|*[!0-9]*) last=0 ;; esac
+    [ $(( now - last )) -lt "$NOTIFY_DEDUP_WINDOW" ] && return 0   # fresh identical toast → skip
   fi
-
-  # Update rate limit timestamp
-  date +%s > "$RATE_LIMIT_FILE"
+  echo "$now" > "$key" 2>/dev/null
 
   # Cross-platform dispatch (macOS osascript / Linux notify-send / Windows toast
   # in PR #2). Per-platform sanitization lives in the dispatcher; the macOS sound

@@ -2,6 +2,65 @@
 
 All notable changes to this project. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [8.5.0] — 2026-07-06
+
+**Context-gate synonym coverage + registry — close the v8.4.0 drift that leaked
+`elevated privileges`.** v8.4.0 gated four *concept* words but matched them by exact
+string, so a synonym of a gated concept slipped through: a research fan-out on
+memory-poisoning attacks hit `elevated privileges` — a synonym of the gated
+`privilege escalation`, living one array over in `MED_JAILBREAK` (lines ~823-826) —
+which was never gated. It escalated to MEDIUM and killed four research subagents in
+24s, all descriptive prose. Root cause: the gate list (`CONTEXT_GATED_PATTERNS`) was a
+hand-copied flat list, structurally unlinked from the detection arrays, so a concept's
+synonyms could be gated or not at random (only 1 of 4 privesc synonyms was).
+
+Structure + scope locked via cross-model DCA (`20260706T142401`, gpt-5.5, thread
+`019f35ae-c252-7bb3-b69b-db36af998f41`; verdict REFINED-AND-PROCEED). Codex converged
+on shipping the surgical registry over a larger array-reslice, and named the biggest
+risk — false confidence from a one-way drift guard — which drove the bidirectional
+contract test below.
+
+### Added
+
+- **`CONTEXT_GATE_REGISTRY`** (`web-safety-scanner.sh`) — a single `"<pattern>:<class>"`
+  source of truth from which BOTH the gate list (`CONTEXT_GATED_PATTERNS`) and the
+  verifier's verb/noun class (passed as `VERIFY_CLASS`) are derived. A synonym can no
+  longer be gated without declaring its class, nor drift out of sync with a second
+  hand-copied list. The privesc synonyms `elevated privileges` / `elevated permissions`
+  / `admin privileges` are now gated (noun class) — the incident payload now clears as
+  descriptive prose (verified: no verifier-regex change was needed, C1's 3rd-person
+  attacker/research subject already covers it).
+- **Context-gate contract test** (`tests/run-tests.sh`) — for every approved topic
+  synonym of each gated concept, asserts it is BOTH a real detection pattern AND
+  registered in the registry (gated). This catches the exact drift direction that
+  leaked (present-in-detection, absent-from-gate); a one-way "registry ⊆ detection"
+  check would not have.
+- **Content-hash notification dedup** (`web-safety-scanner.sh`) — the desktop-toast
+  rate-limit is now keyed on `{severity + content-hash}` with a 300s window
+  (`WEB_SAFETY_NOTIFY_DEDUP_WINDOW`), REPLACING the blunt 5s global timer that both let
+  a fan-out burst of the *same* injected content through (re-detected >5s apart across
+  N subagents — the 2026-07-06 flood) and wrongly muted *distinct* threats within 5s.
+  Toast-only: the audit log, sanitize, subagent kill, and Layer-6 arming stay per-event.
+
+### Scope / known limitations
+
+- Gate expansion is deliberately limited to **research-topic nouns/verbs**. Directive-
+  phrase patterns (`ignore previous instructions`, role-manipulation imperatives) stay
+  ungated — gating a pattern widens its CLEAR (suppression) path, and directive phrases
+  are the attack payload itself (false-negative risk). DCA-confirmed.
+- `jailbreak` spelling variants (`jail break` / `jail-break`) are **not** gated in this
+  release: an evasion view normalizes them to `jailbreak`, but the context-gate verifier
+  locates the match in the *original* text, so the normalized phantom can't be located
+  and fail-safe-KEEPs. Gating them needs a normalized-view locate fix (deferred; the
+  registry makes the addition one line once that lands). This is a pre-existing limit of
+  the v8.4.0 gate, surfaced — not introduced — by this work.
+
+### Tests
+
+- Scanner corpus 73 → 77 (added 2 privesc directive/descriptive fixtures + the
+  context-gate contract check + the notification-dedup check); full suite 327 → **331
+  cases**. macOS (bash 3.2 / BSD sed) + Linux CI green.
+
 ## [8.4.0] — 2026-07-06
 
 **Context-gating — stop topic vocabulary from crying wolf.** The scanner tiered the

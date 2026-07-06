@@ -289,10 +289,18 @@ if [ "${VERIFY_MODE:-structural}" = "directive" ]; then
   fi
 
   # --- FIRE (b): pattern used as an imperative verb or a command label ---
-  case "$LC_PATTERN" in
-    exfiltrate|impersonate) PATTERN_CLASS=verb ;;
-    jailbreak|"privilege escalation") PATTERN_CLASS=noun ;;
-    *) PATTERN_CLASS=verb ;;
+  # Class comes from the scanner's CONTEXT_GATE_REGISTRY via VERIFY_CLASS (single
+  # source of truth). The hardcoded case is a backward-compat fallback for callers
+  # that don't set VERIFY_CLASS (e.g. tests invoking this verifier directly).
+  case "${VERIFY_CLASS:-}" in
+    verb|noun) PATTERN_CLASS="$VERIFY_CLASS" ;;
+    *)
+      case "$LC_PATTERN" in
+        exfiltrate|impersonate) PATTERN_CLASS=verb ;;
+        jailbreak|"privilege escalation") PATTERN_CLASS=noun ;;
+        *) PATTERN_CLASS=verb ;;
+      esac
+      ;;
   esac
 
   # --- FIRE (a2): 2nd-person subject directly governing a gated verb ---

@@ -1,0 +1,5 @@
+Memory Poisoning Research
+
+[3] The MINJA adversary gains elevated privileges over the agent memory store.
+Attackers who obtain elevated permissions can persist across sessions.
+This admin privileges escalation is described in the CVE-2026-0142 advisory.
