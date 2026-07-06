@@ -62,17 +62,18 @@ report() {
 
 MED_PAYLOAD=$(cat "$TESTS_DIR/payloads/med-evasion-cyrillic.txt")
 
-# run_scanner <cfg> <legacy_sid> <canon_session> <agent_id|-> <url> [payload]
+# run_scanner <cfg> <legacy_sid> <canon_session> <agent_id|-> <url> [payload] [permission_mode]
 # Prints scanner stdout. agent_id "-" omits the field (main-session shape).
+# permission_mode "" (default) omits the field (older-harness / interactive shape).
 run_scanner() {
-  local cfg="$1" sid="$2" canon="$3" aid="$4" url="$5" payload="${6:-$MED_PAYLOAD}"
+  local cfg="$1" sid="$2" canon="$3" aid="$4" url="$5" payload="${6:-$MED_PAYLOAD}" mode="${7:-}"
   local envelope
   if [ "$aid" = "-" ]; then
-    envelope=$(jq -n --arg url "$url" --arg output "$payload" --arg sess "$canon" \
-      '{tool_name: "WebFetch", session_id: $sess, tool_input: {url: $url}, tool_response: $output}')
+    envelope=$(jq -n --arg url "$url" --arg output "$payload" --arg sess "$canon" --arg m "$mode" \
+      '{tool_name: "WebFetch", session_id: $sess, tool_input: {url: $url}, tool_response: $output} + (if $m=="" then {} else {permission_mode: $m} end)')
   else
-    envelope=$(jq -n --arg url "$url" --arg output "$payload" --arg sess "$canon" --arg aid "$aid" \
-      '{tool_name: "WebFetch", session_id: $sess, agent_id: $aid, agent_type: "general-purpose", tool_input: {url: $url}, tool_response: $output}')
+    envelope=$(jq -n --arg url "$url" --arg output "$payload" --arg sess "$canon" --arg aid "$aid" --arg m "$mode" \
+      '{tool_name: "WebFetch", session_id: $sess, agent_id: $aid, agent_type: "general-purpose", tool_input: {url: $url}, tool_response: $output} + (if $m=="" then {} else {permission_mode: $m} end)')
   fi
   rm -f /tmp/web-safety-scanner-last-notify
   printf '%s' "$envelope" | WEB_SAFETY_CONFIG_DIR="$cfg" CLAUDE_SESSION_ID="$sid" "$SCANNER" 2>/dev/null
@@ -102,10 +103,23 @@ for needle in "epoch=" "session=sess-$sid" "agent=aid0a1" "severity=MEDIUM" "too
 done
 report "A2 kill writes [PENDING-KILLED] row (epoch/session/agent/severity)" "$ok" "$detail"
 
-# --- A3: subagent MEDIUM kill arms the egress guard (legacy session key)
+# --- A3 (v8.6 mode-conditional arming): a single subagent MEDIUM arms the egress
+#     guard ONLY in non-interactive modes. The A1 run above carried NO permission_mode
+#     (interactive/older-harness shape) → it must NOT have armed (the research-fan-out
+#     ask-flood fix). DCA 20260706T152154.
 [ -f "/tmp/web-safety-session-${sid}-armed" ] \
-  && report "A3 subagent MEDIUM kill arms egress guard" yes \
-  || report "A3 subagent MEDIUM kill arms egress guard" no "no -armed file for $sid"
+  && report "A3a subagent MEDIUM (interactive / no mode) does NOT arm" no "unexpected -armed file for $sid" \
+  || report "A3a subagent MEDIUM (interactive / no mode) does NOT arm" yes
+rm -rf "$cfg"
+
+# --- A3b: the SAME single subagent MEDIUM kill in bypassPermissions DOES arm — the
+#     backstop is kept where the guard enforces as a silent hard-block and no human
+#     is in the loop.
+cfg=$(mktemp -d); sidb="agt-a3b-$$"; CLEANUP_SIDS+=("$sidb" "sess-$sidb")
+run_scanner "$cfg" "$sidb" "sess-$sidb" "aid0a3b" "https://example.test/a3b" "$MED_PAYLOAD" "bypassPermissions" >/dev/null
+[ -f "/tmp/web-safety-session-${sidb}-armed" ] \
+  && report "A3b subagent MEDIUM (bypassPermissions) arms egress guard" yes \
+  || report "A3b subagent MEDIUM (bypassPermissions) failed to arm" no "no -armed file for $sidb"
 rm -rf "$cfg"
 
 # --- A4: main-session MEDIUM is byte-compatible: kill, but NO row, NO arming

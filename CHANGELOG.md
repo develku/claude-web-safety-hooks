@@ -2,6 +2,53 @@
 
 All notable changes to this project. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [8.6.0] — 2026-07-06
+
+**Mode-conditional egress arming — end the research-fan-out outbound ask-flood.** A
+single MEDIUM detection *inside a subagent* armed the Layer 6 egress guard, and the
+armed 300s window then escalated every subsequent outbound (network Bash + non-
+allowlisted WebFetch) to an interactive `ask`. Because a single MEDIUM is a low-
+confidence signal dominated by descriptive security/AI-research prose (`elevated
+privileges`, `stop being`, `assistant:` in memory-poisoning papers), a research
+fan-out produced ~68 egress asks to benign research/docs hosts in one session — all
+false positives, no real injection. (Distinct from the pre-2026-07-06 arxiv asks,
+which were deploy-lag before the default allowlist went live.)
+
+Root cause: arming on a single MEDIUM-in-subagent was the amplifier — one FP → dozens
+of egress prompts. Scoped + confirmed via cross-model DCA (`20260706T152154`, gpt-5.5,
+thread `019f35e1-c90d-7bf0-b70b-eb1d7f4644b0`, REFINED-AND-PROCEED): Codex refined a
+pure "drop it" into the mode-aware rule below and could construct no direct exfil chain
+that the retained kill+sanitize would allow.
+
+### Changed
+
+- **A single MEDIUM-in-subagent arms the egress guard ONLY in non-interactive modes**
+  (`bypassPermissions` / `auto` / `dontAsk`), read from the PostToolUse `permission_mode`
+  field (confirmed present on current harnesses). There the guard enforces as a SILENT
+  hard-block — no ask-flood, and no human in the loop to catch an exfil, so the backstop
+  is load-bearing exactly there. In ask-honoring modes (`default` / `acceptEdits` /
+  `plan`) and when `permission_mode` is absent, a single MEDIUM no longer arms. The
+  subagent is STILL killed (`continue:false`), sanitized (line-level redaction), and
+  ledgered (`[PENDING-KILLED]` → surfaced to the parent by Layer 7). HIGH and cross-tool
+  ESCALATED (3+ MEDIUM in a 5-min window) arm in ALL modes, unchanged — a persistent or
+  high-confidence attack still arms.
+
+### Why this is safe (DCA)
+
+The *primary* barrier against a MEDIUM-injected subagent is the kill + sanitization
+(both retained), NOT the arming — arming is a 300s outbound backstop layered on top.
+Codex could not construct a direct chain where the killed+sanitized subagent itself
+exfils; the only residual is a single, isolated, non-recurring MEDIUM whose *parent*
+then performs a sensitive outbound recovery in an ask-honoring mode — and the parent is
+told via the Layer 7 attribution row, while any HIGH or repeated (ESCALATED) attack
+still arms.
+
+### Tests
+
+- `run-agent-tests.sh` A3 split into A3a (interactive / no-mode → NOT armed) + A3b
+  (`bypassPermissions` → armed); 19 → 20 cases; full suite 331 → **332 cases**. macOS
+  (bash 3.2 / BSD sed) + Linux CI green.
+
 ## [8.5.0] — 2026-07-06
 
 **Context-gate synonym coverage + registry — close the v8.4.0 drift that leaked

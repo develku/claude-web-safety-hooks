@@ -240,6 +240,12 @@ fi
 # degrades to exact v7 behavior, never to a new failure mode.
 AGENT_ID=$(printf '%s' "$INPUT" | jq -r '.agent_id // ""' 2>/dev/null | tr -cd 'A-Za-z0-9_-' | cut -c1-64)
 
+# Active permission mode (default|acceptEdits|plan|auto|dontAsk|bypassPermissions).
+# PostToolUse carries this on current harnesses; empty on an older one. Drives the
+# v8.6 mode-conditional MEDIUM-subagent arming below (see that branch). Same field
+# the egress guard reads to pick ask-vs-block.
+PERM_MODE=$(printf '%s' "$INPUT" | jq -r '.permission_mode // ""' 2>/dev/null)
+
 # Canonical session key for the kill ledger: stdin .session_id is identical in
 # subagent and parent hook input (probe-verified), unlike CLAUDE_SESSION_ID,
 # which is NOT exported to hook processes. The env/PPID SESSION_ID above stays
@@ -2288,13 +2294,24 @@ REASON
   log_detection "MEDIUM" "$MED_LIST"
 
   # v8 die-but-visible: a subagent halted here is a silent null to its
-  # orchestrator (the stopReason has no reader inside a subagent), so record
-  # the kill in the ledger and arm the Layer 6 egress backstop BEFORE the halt.
-  # Main session (no agent_id): byte-identical v7 behavior — no row, no arming;
-  # the interactive stopReason review IS the acknowledgment there.
+  # orchestrator (the stopReason has no reader inside a subagent), so record the
+  # kill in the ledger — Layer 7 (web-safety-agent-result.sh) surfaces that row to
+  # the parent. Main session (no agent_id): byte-identical v7 behavior — no row.
+  #
+  # v8.6 mode-conditional arming (DCA 20260706T152154): a SINGLE MEDIUM is a
+  # low-confidence signal dominated by descriptive security/AI-research prose, and
+  # arming it escalated every subsequent outbound to a 300s `ask` — a research
+  # fan-out FP flood. So arm the Layer 6 backstop ONLY in non-interactive modes
+  # (bypassPermissions/auto/dontAsk), where the egress guard enforces as a SILENT
+  # hard-block (no flood, no human to catch an exfil) — exactly where the backstop
+  # is load-bearing. In ask-honoring modes (default/acceptEdits/plan) and when the
+  # harness omits permission_mode, a single MEDIUM no longer arms (kill + sanitize
+  # + ledger stay; HIGH and 3+ ESCALATED still arm in ALL modes).
   if [ -n "$AGENT_ID" ]; then
     record_agent_kill "MEDIUM" "$MED_LIST"
-    arm_egress_guard
+    case "$PERM_MODE" in
+      bypassPermissions|auto|dontAsk) arm_egress_guard ;;
+    esac
   fi
 
   send_notification "MEDIUM" "⚠️ Web Safety: WARNING [${TOOL_NAME}]" "Patterns: ${MED_LIST//\"/}" "Sosumi" "${TOOL_URL}"
