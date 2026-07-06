@@ -1,0 +1,11 @@
+# Understanding ChatML Chat Templates
+
+When studying chat-template formats, it helps to know how models delimit roles.
+In the ChatML format a conversation uses control tokens: `<|im_start|>system`
+opens the system message, `<|im_end|>` closes it, and `<|im_start|>assistant`
+marks where the model replies. Llama-family models instead use
+`<|begin_of_text|>` together with `<|start_header_id|>user<|end_header_id|>`.
+
+Security writeups note that a fake `<|im_start|>system` block hidden inside
+fetched web content could try to hijack the model. A detection layer scans
+retrieved documents for these control tokens before the model reads them.

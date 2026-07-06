@@ -17,7 +17,7 @@ The scanner classifies content into **HIGH**, **MEDIUM**, and **LOW** severity. 
 
 ### LLM special tokens
 
-Model-specific control tokens that should never appear in legitimate web content. Examples: `<|im_start|>`, `<|im_end|>`, `<|endoftext|>`, `<<SYS>>`, `<|start_header_id|>`, Claude-specific `<system-reminder>`, `[HUMAN]`, `[ASSISTANT]`, DeepSeek/Qwen `<|reserved_special_token`, etc.
+Model-specific control tokens whose bare presence signals a live chat-template injection. Examples: `<|im_start|>`, `<|im_end|>`, `<|endoftext|>`, `<<SYS>>`, `<|start_header_id|>`, Claude-specific `<system-reminder>`, `[HUMAN]`, `[ASSISTANT]`, DeepSeek/Qwen `<|reserved_special_token`, etc. Since v8.8 these are **structurally context-gated** (see Layer 5b): they still fire HIGH when **bare** (a functioning template boundary), but an occurrence that is only ever an **inline quote** (`` `<|im_start|>` ``) or an **inert JSON/YAML string value** clears — legitimate research (model cards, ChatML/Llama format references, prompt-injection writeups) quotes these tokens descriptively. A raw fenced/block template line (`code_fence`/`<pre>`) is **never** cleared — that is the attack shape.
 
 ### Tool / function-call faking
 
@@ -137,6 +137,19 @@ research-*topic* nouns/verbs are gated — directive-phrase patterns (`ignore pr
 instructions`, `you are now`, …) are **never** gated, because gating widens a pattern's
 CLEAR (suppression) path and those phrases are the payload itself (false-negative risk).
 Locked via DCA `20260706T142401`.
+
+**v8.8 — structural gate for HIGH LLM control tokens.** The same gate machinery now also
+covers the `HIGH_LLM_TOKENS` chat-template tokens (`<|im_start|>`, `<|begin_of_text|>`, …),
+which fired HIGH and armed Layer 6 on research pages that merely *quote* them.
+`ctxgate_should_clear` gained a `mode` param: the topic vocabulary above uses `directive`
+mode; the tokens use **`structural`** mode, which clears an occurrence **only** when it is
+an inline quote (markdown / HTML inline code) or an inert JSON/YAML string value — a
+**bare** token, or one on a `code_fence` / block-scalar / `<pre>` line, is **kept** (that
+is the live-template-injection shape). The verifier's co-location guard and the independent
+MED layers keep a realistic injection at HIGH/MEDIUM, never CLEAN; the fence-KEEP rule
+closes the *fence-to-evade* class an enclosure-only draft opened (found by an adversarial
+probe + the `security-auditor` agent). Fixtures: `legit-llm-tokens-chatml-research` (clears),
+`high-llm-token-fenced-template` (kept HIGH though its body dodges every MED pattern).
 
 | Input | Verdict | Why |
 |---|---|---|

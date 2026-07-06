@@ -1438,29 +1438,68 @@ if [ "$CONTEXT_GATE_ENABLED" = "true" ] && [ -x "$CTXGATE_VERIFIER" ] \
   # evidence. Fixes power-code-reviewer Findings 1 (cap dropped evidence) and 2
   # (empty verdict scored as clear).
   CTXGATE_OCC_CAP=20
+  # $1 = lowercased pattern; $2 = verifier mode (directive|structural, default
+  # directive). directive = topic-vocab grammar (verb/noun) gate. structural =
+  # "is the match enclosed in code/quote (descriptive) vs bare (live)?" — used for
+  # the HIGH LLM control tokens, which have no directive grammar (see the token
+  # loop below). Same fail-safe: KEEP unless EVERY located occurrence is "fp".
   ctxgate_should_clear() {
-    local lc_p="$1" lines n verdict raw count vclass
+    local lc_p="$1" mode="${2:-directive}" lines n verdict raw count vclass ctx
     vclass=$(ctxgate_class "$lc_p")                    # registry-declared verb|noun
     lines=$(echo "$TOOL_OUTPUT" | grep -inF -- "$lc_p" 2>/dev/null | cut -d: -f1)
     [ -z "$lines" ] && return 1                        # cannot locate → KEEP
     count=$(printf '%s\n' "$lines" | grep -c .)
     [ "$count" -gt "$CTXGATE_OCC_CAP" ] && return 1    # too many to verify all → KEEP
     for n in $lines; do
-      raw=$(echo "$TOOL_OUTPUT" | \
-        VERIFY_MODE=directive VERIFY_PATTERN="$lc_p" VERIFY_CLASS="$vclass" VERIFY_LINE_NUM="$n" \
-        perl -e 'alarm 1; exec { $ARGV[0] } @ARGV' "$CTXGATE_VERIFIER" 2>/dev/null \
-        || echo '{"verdict":"genuine"}')
+      if [ "$mode" = "structural" ]; then
+        raw=$(echo "$TOOL_OUTPUT" | \
+          VERIFY_PATTERN="$lc_p" VERIFY_LINE_NUM="$n" \
+          perl -e 'alarm 1; exec { $ARGV[0] } @ARGV' "$CTXGATE_VERIFIER" 2>/dev/null \
+          || echo '{"verdict":"genuine"}')
+      else
+        raw=$(echo "$TOOL_OUTPUT" | \
+          VERIFY_MODE=directive VERIFY_PATTERN="$lc_p" VERIFY_CLASS="$vclass" VERIFY_LINE_NUM="$n" \
+          perl -e 'alarm 1; exec { $ARGV[0] } @ARGV' "$CTXGATE_VERIFIER" 2>/dev/null \
+          || echo '{"verdict":"genuine"}')
+      fi
       verdict=$(echo "$raw" | jq -r '.verdict // "genuine"' 2>/dev/null)
       [ -z "$verdict" ] && verdict=genuine             # empty/timeout/unparseable → genuine
       [ "$verdict" != "fp" ] && return 1               # any non-"fp" occurrence → KEEP
+      # Structural (token) mode ONLY clears an INLINE quote or an inert string
+      # VALUE — never a raw fenced/block line. A control token sitting bare on a
+      # `code_fence` / block-scalar / <pre> line is the live-template-injection
+      # shape (`<|im_start|>system\n<imperative>\n<|im_end|>`): "enclosed" but
+      # still a functioning boundary, and its imperative body may dodge every MED
+      # pattern (fence-to-evade class). Restricting to inline/string contexts
+      # closes that hole while still clearing the dominant research FP (docs/blogs
+      # quoting a token inline). Directive mode is unaffected (accepts any "fp").
+      if [ "$mode" = "structural" ]; then
+        ctx=$(echo "$raw" | jq -r '.context // ""' 2>/dev/null)
+        case "$ctx" in
+          markdown_inline_code|html_code_inline|json_string|yaml_string) ;;
+          *) return 1 ;;                               # code_fence / block / other → KEEP
+        esac
+      fi
     done
     return 0                                           # every occurrence explicitly fp → CLEAR
   }
 
-  ctxgate_log_clear() {  # $1 = tier label, $2 = original-cased pattern
-    local h
+  ctxgate_log_clear() {  # $1 = tier label, $2 = original-cased pattern, $3 = reason (optional)
+    local h reason="${3:-descriptive prose, no directive to model}"
     h=$(echo "$TOOL_OUTPUT" | shasum -a 256 | cut -d' ' -f1)
-    echo "[$(date '+%Y-%m-%d %H:%M:%S')] [CONTEXT-CLEARED] tool=${TOOL_NAME} ${TOOL_URL:+url=${TOOL_URL} }tier=${1} pattern=\"${2}\" reason=\"descriptive prose, no directive to model\" hash=${h:0:12}" >> "$LOG_FILE"
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] [CONTEXT-CLEARED] tool=${TOOL_NAME} ${TOOL_URL:+url=${TOOL_URL} }tier=${1} pattern=\"${2}\" reason=\"${reason}\" hash=${h:0:12}" >> "$LOG_FILE"
+  }
+
+  # HIGH LLM control tokens (<|im_start|>, <|begin_of_text|>, …) fire HIGH on bare
+  # PRESENCE — the correct signal for a live chat-template injection, but a false
+  # alarm for research/docs that QUOTE the token in backticks or a code fence
+  # (HuggingFace model cards, ChatML explainers, Llama prompt-format references).
+  # Those FPs armed the egress guard during outbound/injection research, flooding
+  # the operator with EGRESS-ASK prompts (incident 2026-07-06). Membership check
+  # against the HIGH_LLM_TOKENS array (single source of truth), lowercased once.
+  HIGH_LLM_TOKENS_LC=$(printf '%s\n' "${HIGH_LLM_TOKENS[@]}" | tr '[:upper:]' '[:lower:]')
+  ctxgate_is_llm_token() {  # $1 = lowercased pattern → 0 if it is a HIGH_LLM_TOKENS entry
+    printf '%s\n' "$HIGH_LLM_TOKENS_LC" | grep -qxF -- "$1"
   }
 
   CTXGATE_NEW_HIGH=()
@@ -1468,6 +1507,16 @@ if [ "$CONTEXT_GATE_ENABLED" = "true" ] && [ -x "$CTXGATE_VERIFIER" ] \
     lc_p=$(echo "$p" | tr '[:upper:]' '[:lower:]')
     if ctxgate_is_gated "$lc_p" && ctxgate_should_clear "$lc_p"; then
       ctxgate_log_clear "HIGH" "$p"
+      continue
+    fi
+    # Structural gate for LLM control tokens: CLEAR only when EVERY occurrence is
+    # enclosed in code/quote (descriptive research) — a bare token (a live
+    # template boundary) stays HIGH, and the verifier's co-location guard keeps a
+    # fenced token genuine if its line carries an injection keyword. A real
+    # template injection's imperative body is independently caught by the MED
+    # layers, so clearing an enclosed token never blinds detection.
+    if ctxgate_is_llm_token "$lc_p" && ctxgate_should_clear "$lc_p" structural; then
+      ctxgate_log_clear "HIGH" "$p" "descriptive: enclosed control token (code/quote), not a live boundary"
       continue
     fi
     CTXGATE_NEW_HIGH+=("$p")

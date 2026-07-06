@@ -2,6 +2,55 @@
 
 All notable changes to this project. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [8.8.0] — 2026-07-06
+
+**LLM control-token false positive — stop research pages that QUOTE chat-template tokens
+from arming the egress guard.** The ChatML/Llama control tokens (`<|im_start|>`,
+`<|im_end|>`, `<|begin_of_text|>`, `<|start_header_id|>`, `<|eot_id|>`, `<<sys>>`, … — the
+`HIGH_LLM_TOKENS` array) fire **HIGH** on bare presence, the correct signal for a live
+chat-template injection. But that rested on the assumption that these tokens *"should
+never appear in legitimate web content"* — false for research: HuggingFace model cards,
+ChatML explainers, Llama prompt-format references, and prompt-injection writeups all
+**quote** these tokens descriptively. A page that mentions `` `<|im_start|>` `` in prose
+fired HIGH → halt + redaction → **armed the Layer 6 egress guard**, which then escalated
+every subsequent outbound to an interactive `ask` for 300s — the *"lots of false alarms
+during outbound research, and some `|` pattern"* the operator hit (reproduced: a ChatML
+explainer classified HIGH and armed the guard). Unlike the topic vocabulary the v8.4.0
+context-gate already covers, these tokens were never routed through the gate.
+
+### Changed
+
+- **`HIGH_LLM_TOKENS` matches now route through the structural verifier**
+  (`web-safety-verify-context.sh`, `structural` mode) before the HIGH verdict + arming. A
+  token clears to clean only when **every** located occurrence is an **inline quote**
+  (`` `<|im_start|>` `` markdown / HTML inline code) or an **inert string value** (JSON /
+  YAML config value) — the shapes research uses. `ctxgate_should_clear` gained a `mode`
+  parameter (default `directive`, so the existing topic-vocab gate is untouched); the
+  token loop calls it in `structural` mode.
+
+### Why this is safe (security-audited, adversarial)
+
+- A **bare** token — the only form that functions as a live template boundary — is never
+  cleared: `code_fence` / block-scalar / `<pre>` contexts are explicitly rejected, so a
+  raw fenced template `<|im_start|>system\n<imperative>\n<|im_end|>` stays **HIGH**. This
+  closes the *fence-to-evade* class that an initial, too-broad (enclosure-only) draft
+  opened — caught by both an in-loop adversarial probe and the `security-auditor` agent
+  (its LOW-1 finding; this fix is stronger than the co-location-keyword-scan hardening it
+  suggested).
+- The verifier's **co-location guard** keeps an inline token genuine if its line carries
+  an injection keyword, and a real injection's imperative body is independently caught by
+  the MED layers — so a realistic ChatML injection lands at HIGH (co-location) or at worst
+  MEDIUM (MED body), **never CLEAN**.
+- Fail-safe throughout: cannot-locate / >20 occurrences / verifier timeout / any non-`fp`
+  verdict all KEEP. `HIGH_TOOL_FAKING` (`<tool_use>` …) and every other HIGH detector are
+  untouched.
+
+Three fixtures: `legit-llm-tokens-chatml-research` (inline quote → clean),
+`high-llm-token-coloc-evasion` (inline token + injection keyword → HIGH via co-location),
+and `high-llm-token-fenced-template` (a fenced injection whose body dodges every MED
+pattern → HIGH via the retained token). Scanner corpus 79 → 82 (now 7 suites · 337 cases).
+Disable with `CONTEXT_GATE_ENABLED=false`.
+
 ## [8.7.0] — 2026-07-06
 
 **Transcript-delimiter false positive — stop killing research subagents on quoted chat
