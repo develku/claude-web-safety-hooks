@@ -2,6 +2,55 @@
 
 All notable changes to this project. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [8.9.0] — 2026-07-11
+
+**Oversized-page truncation notice — stop a benign large page from crying "content-hiding
+technique."** When fetched content exceeds the scan-size cap, the scanner scans a bounded
+HEAD+TAIL slice and notes that the middle went unscanned (finding #1, v7.3.0). That note was
+pushed into `FOUND_LOW` and emitted through the LOW **threat** path, so every oversized-but-
+benign page was mislabeled *"Common web techniques detected that may be used for hiding
+content,"* fired a desktop notification (Ping), and inflated `/web-safety-report`'s LOW threat
+count. A `platform.claude.com` docs page (~45 KB) tripped it on every fetch — a research
+fan-out re-fetching it produced a LOW flood (reproduced on the real page content: 17 LOW
+events in one window, all this note). The truncation caveat is scan **coverage** metadata,
+not a content **detection** — conflating the two was the bug.
+
+### Changed
+
+- **Scan cap raised 32 KB → 64 KB** (`MAX_SCAN_BYTES`, still overridable via
+  `WEB_SAFETY_MAX_SCAN_BYTES`). Measured full-pipeline scan time is ~linear in bytes and line
+  structure barely matters (grep-on-long-lines is not the dominant cost): ~3 s at 32 KB, ~4 s
+  at 64 KB, ~6.6 s at 128 KB, ~11 s at 256 KB. 32 KB burned under a third of the 10 s
+  PostToolUse budget yet truncated typical docs pages (~40–60 KB: platform.claude.com,
+  arxiv), firing the note on every one. 64 KB fits those whole with a safe margin (measured
+  3.87 s worst-case single-line at the cap); 128 KB is the practical ceiling (~3.4 s margin —
+  risky on slower machines). A typical docs page is now scanned **whole and silent**.
+- **Truncation reclassified LOW → INFO** when it is the *sole* finding. It still rides
+  `FOUND_LOW` (so control flow — and the E8 reassembly path — is byte-identical), but the LOW
+  emit branch now separates the coverage caveat from real content-hiding findings: a
+  truncation-only result emits a `WEB CONTENT NOTE [INFO]` systemMessage, writes an `[INFO]`
+  audit line kept **out of** the report's HIGH/MEDIUM/LOW threat counts, and fires **no**
+  desktop notification. When a page *also* has a real finding, the truncation note rides
+  along with it on the normal LOW path unchanged.
+
+### Why this is safe
+
+- Finding #1's intent — *never silently trust the unscanned middle* — is preserved: the model
+  still receives an accurate coverage caveat, just as INFO (not a threat) and without the
+  notification/threat-count noise. The note was NOT removed, only reclassified.
+- A **real** LOW finding (zero-width chars, bidi overrides, etc.) on an oversized page still
+  emits LOW; a HIGH token past the 64 KB head slice is still caught by the tail slice and
+  still blocks (`continue:false`). Both verified.
+- The cap raise cannot blow the hook timeout: worst-case adversarial single-line content is
+  truncated to 64 KB and scans in ~4 s against the 10 s budget.
+
+### Tests
+
+- Three scanner assertions: oversized-clean page → INFO not LOW (no notification, no `[LOW]`
+  log); a 50 KB page fits under the new cap → fully scanned + silent; tail-injection past the
+  **64 KB** head slice still detected HIGH (the existing tail test's padding bumped 40 KB →
+  80 KB so truncation still engages). Scanner suite 82 → 84 (now 7 suites · 339 cases).
+
 ## [8.8.0] — 2026-07-06
 
 **LLM control-token false positive — stop research pages that QUOTE chat-template tokens
