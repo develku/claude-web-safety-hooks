@@ -353,6 +353,10 @@ privilege escalation
 elevated privileges
 elevated permissions
 admin privileges
+diagnostic mode
+sudo mode
+root mode
+root access
 CTX_EOF
 if [ "$ctx_contract_ok" -eq 1 ]; then
   PASS=$((PASS + 1)); printf "  ✓ %s\n" "context-gate contract: every approved synonym is detected AND gated"

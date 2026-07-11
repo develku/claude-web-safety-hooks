@@ -786,7 +786,6 @@ MED_JAILBREAK=(
   "god mode enabled"
   "god mode activated"
   "god mode on"
-  "maintenance mode"
   "test mode enabled"
   "test mode activated"
   "diagnostic mode"
@@ -794,6 +793,14 @@ MED_JAILBREAK=(
   "admin mode activated"
   "admin override"
   "administrator override"
+  # "maintenance mode" DELETED (v8.10.0, DCA 20260711T133355): a pure operational
+  # phrase (Laravel/WordPress/Kubernetes) with negligible unique jailbreak value —
+  # it false-armed the egress guard on reranker research (2026-07-11 flood). The
+  # other four benign-frequent mode/privilege nouns — "diagnostic mode" (above),
+  # "sudo mode"/"root access"/"root mode" (here) — stay as detection patterns but
+  # are context-gated as nouns via CONTEXT_GATE_REGISTRY, so descriptive prose
+  # clears while directive uses ("sudo mode:", "root access granted:", model-directed
+  # framing) still fire.
   "sudo mode"
   "root access"
   "root mode"
@@ -1411,9 +1418,17 @@ CTXGATE_VERIFIER="$HOOKS_DIR/web-safety-verify-context.sh"
 # lines ~823-826: "elevated privileges"/"elevated permissions"/"admin privileges") were
 # not, leaking descriptive security-research prose to MEDIUM (incident 2026-07-06).
 # Coverage is enforced by the context-gate contract test in tests/run-tests.sh.
-# Scope note: gate ONLY research-topic nouns/verbs, NEVER directive-phrase patterns —
-# gating a pattern expands its CLEAR (suppression) path, and directive phrases are the
-# payload itself (false-negative risk). DCA 20260706T142401.
+# Scope note: gate research-topic nouns/verbs AND benign-frequent mode/privilege
+# NOUNS, but NEVER payload-imperative directive phrases ("ignore previous
+# instructions", role-manipulation commands) — gating expands a pattern's CLEAR
+# (suppression) path, and a payload imperative IS the attack (false-negative risk).
+# Refined by DCA 20260711T133355 (cross-model gpt-5.5): the earlier "never gate
+# directive phrases" rule (DCA 20260706T142401) targets payload imperatives, not
+# benign-frequent mode/privilege nouns like "sudo mode"/"root access" — those are
+# nouns that saturate ops/Linux docs, and the directive verifier keeps their real
+# directive uses ("sudo mode:", "root access granted:", model-directed framing)
+# while clearing descriptive prose. FP reduction is partial (noun-phrase benign
+# clears; imperative-benign "enter sudo mode" fail-safe-fires — tracked follow-up).
 CONTEXT_GATE_REGISTRY=(
   "exfiltrate:verb"
   "impersonate:verb"
@@ -1422,6 +1437,12 @@ CONTEXT_GATE_REGISTRY=(
   "elevated privileges:noun"
   "elevated permissions:noun"
   "admin privileges:noun"
+  # v8.10.0 (DCA 20260711T133355) — benign-frequent mode/privilege nouns; descriptive
+  # clears, directive fires. Detected in MED_JAILBREAK; gated here (contract-tested).
+  "diagnostic mode:noun"
+  "sudo mode:noun"
+  "root mode:noun"
+  "root access:noun"
 )
 CONTEXT_GATED_PATTERNS=()
 for _cg in "${CONTEXT_GATE_REGISTRY[@]}"; do CONTEXT_GATED_PATTERNS+=("${_cg%%:*}"); done

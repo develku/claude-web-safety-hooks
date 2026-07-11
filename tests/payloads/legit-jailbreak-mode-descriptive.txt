@@ -1,0 +1,7 @@
+Operations runbook — mode and privilege terminology in ordinary docs.
+
+The appliance has a diagnostic mode for self-test.
+The installer requires root access to continue on Linux.
+You can boot the handset into root mode to reflash the image.
+GitHub provides a sudo mode that confirms sensitive actions.
+The service shows a maintenance mode page during upgrades.
