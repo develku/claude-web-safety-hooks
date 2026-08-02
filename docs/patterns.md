@@ -58,7 +58,7 @@ Invisible ASCII encoding via U+E0000–E007F range — used to smuggle instructi
 | Leetspeak obfuscation | `1gn0r3 pr3v10us` detected after normalization |
 | Mixed-script homoglyphs | Cyrillic/Latin mixing in the same word |
 
-Since v8.4, the bare topic words `jailbreak`, `privilege escalation`, and `impersonate` — plus the privesc synonyms `elevated privileges` / `elevated permissions` / `admin privileges` since v8.5 — are **context-gated** (see Layer 5b): they fire as a directive to the model but clear in descriptive prose ("adversaries impersonate users", "a privilege escalation vulnerability", "the attacker gains elevated privileges"). `prompt injection` was downgraded to LOW (a pure label). The compound override/role/mode phrases above (`ignore previous instructions`, `you are now`, `DAN mode`, …) are **not** gated — they remain human-reviewed.
+Since v8.4, the bare topic words `jailbreak`, `privilege escalation`, and `impersonate` — plus the privesc synonyms `elevated privileges` / `elevated permissions` / `admin privileges` since v8.5 — are **context-gated** (see Layer 5b): they fire as a directive to the model but clear in descriptive prose ("adversaries impersonate users", "a privilege escalation vulnerability", "the attacker gains elevated privileges"). `prompt injection` was downgraded to LOW (a pure label) in v8.4, and to an INFO note in v8.11. The compound override/role/mode phrases above (`ignore previous instructions`, `you are now`, `DAN mode`, …) are **not** gated — they remain human-reviewed.
 
 ## LOW severity
 
@@ -66,7 +66,7 @@ Since v8.4, the bare topic words `jailbreak`, `privilege escalation`, and `imper
 |---|---|
 | HTML / CSS hiding | `display:none`, `visibility:hidden`, `font-size:0`, `opacity:0;`, `position:absolute;left:-9999`, `clip:rect(0,0,0,0)` |
 | Markdown images (common) | `![img](http...`, `![image](http...` |
-| Security topic vocabulary (v8.4) | `prompt injection` — the *name* of an attack class, never the mechanism; notify-only, downgraded from MEDIUM |
+| Security topic vocabulary (v8.4) | `prompt injection` — the *name* of an attack class, never the mechanism. Downgraded from MEDIUM in v8.4; since **v8.11** it surfaces as an **INFO note, not a LOW threat**, when it is the only finding — no notification, no `[LOW]` audit line. Alongside a real hiding technique it still rides in the LOW list. |
 | Invisible Unicode | Zero-width chars (U+200B-200D), bidi overrides (U+202A-202E), invisible fillers (Mongolian/Braille/Hangul), variation selectors, U+2028/U+2029 line separators. *Emoji-safe since v7.8.0:* zero-width fires only when ASCII-adjacent (not between emoji), variation selectors only as a run of ≥2 (not single-selector emoji like ⚠️). |
 
 ## Evasion-resistant views

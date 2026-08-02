@@ -1159,6 +1159,20 @@ LOW_TOPIC_VOCAB=(
   "prompt injection"
 )
 
+# low_is_topic_vocab <finding> — true (0) if the finding is a topic LABEL rather
+# than a content-hiding technique. Derived from LOW_TOPIC_VOCAB itself so the emit
+# stage cannot drift from the pattern list (same single-source discipline as
+# CONTEXT_GATE_REGISTRY). Case-insensitive: a finding carries the page's original
+# casing, the array is lowercase.
+low_is_topic_vocab() {
+  local f v
+  f=$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')
+  for v in "${LOW_TOPIC_VOCAB[@]}"; do
+    [ "$f" = "$(printf '%s' "$v" | tr '[:upper:]' '[:lower:]')" ] && return 0
+  done
+  return 1
+}
+
 # =============================================================================
 # Batch pattern matching (performance optimized, bash 3.2 compatible)
 # Uses temp pattern files + grep -Ff for 3 calls per severity
@@ -2426,26 +2440,38 @@ REASON
 
 # --- LOW SEVERITY: Notification only ---
 elif [ ${#UNIQUE_LOW[@]} -gt 0 ]; then
-  # Separate the scan-COVERAGE caveat (truncation) from real content-hiding
-  # findings. Truncation is not a threat: if it is the ONLY finding, emit an INFO
-  # note — no desktop notification, an [INFO] audit line kept out of the report's
-  # HIGH/MEDIUM/LOW threat counts — instead of a LOW "content-hiding" warning. This
-  # is the fix for the false-alarm flood on large benign docs pages. When a REAL low
-  # finding is also present, fall through to the normal LOW path (which still lists
-  # the truncation note alongside it).
+  # Separate NON-THREAT notes from real content-hiding findings. Two kinds qualify:
+  #   * the scan-COVERAGE caveat (truncation) — v8.9.0
+  #   * TOPIC VOCABULARY (LOW_TOPIC_VOCAB) — v8.11.0: the NAME of an attack class is
+  #     not the attack. `prompt injection` was 11 of 18 LOW events in three weeks of
+  #     the live log, every one of them a security doc discussing the subject.
+  # If notes are the ONLY findings, emit an INFO note — no desktop notification, an
+  # [INFO] audit line kept out of the report's HIGH/MEDIUM/LOW threat counts —
+  # instead of a LOW "content-hiding" warning. When a REAL low finding is also
+  # present, fall through to the normal LOW path, which still lists the notes
+  # alongside it (a note never masks or downgrades a real finding).
   REAL_LOW=()
+  NOTE_LOW=()
   TRUNC_PRESENT=0
   for _low in "${UNIQUE_LOW[@]}"; do
     if [ "$_low" = "$TRUNCATION_NOTE" ]; then
-      TRUNC_PRESENT=1
+      TRUNC_PRESENT=1; NOTE_LOW+=("$_low")
+    elif low_is_topic_vocab "$_low"; then
+      NOTE_LOW+=("$_low")
     else
       REAL_LOW+=("$_low")
     fi
   done
 
-  if [ ${#REAL_LOW[@]} -eq 0 ] && [ "$TRUNC_PRESENT" = "1" ]; then
-    MSG="WEB CONTENT NOTE [INFO]: This page exceeded the ${MAX_SCAN_BYTES}-byte injection-scan limit, so only its start and end were scanned — the middle was not. No injection patterns were found in the scanned portion; continue normally, but do not treat the unscanned middle as verified-safe."
-    log_detection "INFO" "$TRUNCATION_NOTE"
+  if [ ${#REAL_LOW[@]} -eq 0 ] && [ ${#NOTE_LOW[@]} -gt 0 ]; then
+    MSG="WEB CONTENT NOTE [INFO]:"
+    if [ "$TRUNC_PRESENT" = "1" ]; then
+      MSG="$MSG This page exceeded the ${MAX_SCAN_BYTES}-byte injection-scan limit, so only its start and end were scanned — the middle was not. No injection patterns were found in the scanned portion; continue normally, but do not treat the unscanned middle as verified-safe."
+    fi
+    if [ ${#NOTE_LOW[@]} -gt "$TRUNC_PRESENT" ]; then
+      MSG="$MSG This page uses security-topic vocabulary (the NAMES of attack classes, not an attack). No injection patterns were found; continue normally."
+    fi
+    log_detection "INFO" "$(format_list "${NOTE_LOW[@]}")"
     jq -n --arg msg "$MSG" '{"systemMessage": $msg}'
     exit 0
   fi

@@ -40,7 +40,9 @@ docs.python.org
 wiki.example.internal
 ```
 
-The allowlist short-circuits **soft blocks only** — high-risk TLD and the custom blocklist. Hard blocks (SSRF, dangerous URI schemes, IP addresses, credentials in URL, oversized URLs, excessive encoding, open redirects) still apply because those are security primitives, not heuristics.
+The allowlist short-circuits **soft blocks only** — high-risk TLD and the custom blocklist. Hard blocks (SSRF, dangerous URI schemes, IP addresses, credentials in URL, oversized URLs, excessive encoding, cross-host open redirects) still apply because those are security primitives, not heuristics.
+
+Since v8.11.0 the open-redirect block is **host-aware**: a redirect-ish parameter (`?url=`, `?redirect=`, `?next=`, …) only hard-blocks when its target host is foreign to the request host. A target that is the request host itself, or a subdomain of it, is not a bounce and passes (`youtube.com/oembed?url=youtube.com/watch`). A *parent*-domain target still blocks.
 
 ## URL blocklist
 

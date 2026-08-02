@@ -196,6 +196,32 @@ is_approve "$(aq 'how to block localhost SSRF and .tk domains')" \
 is_approve "$(aq 'fetch http://127.0.0.1 docs for testing')" \
   && ok "approve: query mentioning internal URL not blocked" || bad "approve: query mentioning internal URL not blocked"
 
+# --- open-redirect: same-host target is not an open redirect (v8.11.0) ---
+# The block exists to stop the fetcher being bounced to an ATTACKER-controlled
+# host. A redirect-ish param whose target is the request host itself (or a
+# subdomain of it) cannot bounce off-origin, so it must not hard-block. Live FP:
+# youtube.com/oembed?url=youtube.com/watch was PRE-BLOCKed twice (2026-05-04,
+# 2026-07-31), which breaks every oEmbed/transcript workflow.
+ora() { jq -nc --arg u "$1" '{tool_name:"WebFetch", tool_input:{url:$u}}' | WEB_SAFETY_CONFIG_DIR="$(mktemp -d)" "$APPROVE"; }
+is_approve "$(ora 'https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v=OLu2YT8O72I&format=json')" \
+  && ok "approve: same-host redirect param not blocked (oEmbed FP)" \
+  || bad "approve: same-host redirect param not blocked (oEmbed FP)"
+is_approve "$(ora 'https://youtube.com/x?url=https://www.youtube.com/watch?v=A')" \
+  && ok "approve: subdomain-of-request-host redirect target allowed" \
+  || bad "approve: subdomain-of-request-host redirect target allowed"
+# regressions: a genuinely foreign target must STILL hard-block
+is_block "$(ora 'https://legit.com/page?redirect=https://evil.com')" \
+  && ok "approve: cross-host open redirect still blocked" || bad "approve: cross-host open redirect still blocked"
+# suffix confusion — legit.com.evil.com is NOT legit.com (label boundary)
+is_block "$(ora 'https://legit.com/p?url=https://legit.com.evil.com/steal')" \
+  && ok "approve: suffix-confusion redirect target blocked" || bad "approve: suffix-confusion redirect target blocked"
+# ANY foreign target among several params blocks the whole URL
+is_block "$(ora 'https://a.test/p?url=https://a.test/x&next=https://evil.test/y')" \
+  && ok "approve: one foreign target among many still blocks" || bad "approve: one foreign target among many still blocks"
+# a parent-domain target is NOT auto-allowed (only equal-or-subdomain is)
+is_block "$(ora 'https://www.a.test/p?url=https://a.test/x')" \
+  && ok "approve: parent-domain redirect target still blocked" || bad "approve: parent-domain redirect target still blocked"
+
 # --- log -> report injection hardening (#12) ---
 # report.sh must neutralize backticks in logged content so a logged URL can't
 # close the Markdown code fence and inject markdown.

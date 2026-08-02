@@ -80,7 +80,40 @@ if [ -n "$URL" ]; then
   esac
   [ ${#URL} -gt 2048 ] && block_url "URL exceeds 2048 chars"
   echo "$URL" | grep -qEi 'https?://[^/]*:[^/]*@' && block_url "credentials in URL"
-  echo "$URL" | grep -qEi '([?&](redirect|url|next|goto|return|redir|dest|target|forward|continue|returnUrl)=https?://)' && block_url "open redirect parameter"
+  # Open redirect: the risk is the fetcher being bounced to an ATTACKER-controlled
+  # host, so block only when a redirect-ish param's target host is FOREIGN to the
+  # request host. A same-origin target (equal host, or a subdomain of it) cannot
+  # bounce off-origin — blocking it is a pure FP, and it hard-blocked
+  # youtube.com/oembed?url=youtube.com/watch twice in the live log (2026-05-04,
+  # 2026-07-31). Deliberately asymmetric: a PARENT-domain target is still foreign
+  # (sibling-subdomain takeover is a real bounce), matching host_in_list's
+  # equals-or-subdomain rule rather than widening it.
+  # Parser note: the target authority is taken up to the first /?&# so the OUTER
+  # URL's own &params (e.g. &format=json) are not swallowed into the host.
+  # ANY foreign/unparseable target among several params blocks the whole URL.
+  REDIR_TARGETS=$(printf '%s' "$URL" | grep -oEi '[?&](redirect|url|next|goto|return|redir|dest|target|forward|continue|returnUrl)=https?://[^/?&#]*')
+  if [ -n "$REDIR_TARGETS" ]; then
+    # Without the lib we cannot compare hosts — fall back to the old
+    # unconditional block rather than silently letting a redirect through.
+    if ! command -v normalize_host >/dev/null 2>&1; then
+      block_url "open redirect parameter"
+    fi
+    REQ_HOST=$(normalize_host "$URL_C")
+    # No comparable request host (empty / parser-desync sentinel) → cannot prove
+    # same-origin → block.
+    { [ -z "$REQ_HOST" ] || [ "$REQ_HOST" = "ws-invalid-authority" ]; } \
+      && block_url "open redirect parameter"
+    # Herestring, not a pipe: block_url's exit must terminate the hook, and a
+    # piped `while` would run in a subshell where that exit is swallowed.
+    while IFS= read -r _rt; do
+      [ -n "$_rt" ] || continue
+      REDIR_HOST=$(normalize_host "${_rt#*=}")
+      case "$REDIR_HOST" in
+        "$REQ_HOST"|*."$REQ_HOST") : ;;   # same-origin or subdomain — no bounce
+        *) block_url "open redirect parameter" ;;
+      esac
+    done <<< "$REDIR_TARGETS"
+  fi
   ENCODED_COUNT=$(echo "$URL" | grep -oEi '%[0-9a-f]{2}' | wc -l)
   [ "$ENCODED_COUNT" -gt 10 ] && block_url "excessive URL encoding ($ENCODED_COUNT sequences)"
 

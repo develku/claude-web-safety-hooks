@@ -68,6 +68,7 @@ classify() {
     "ESCALATED TO HIGH SEVERITY"*) echo "high" ;;
     "PROMPT INJECTION WARNING [MEDIUM SEVERITY]"*) echo "medium" ;;
     "WEB CONTENT NOTE [LOW SEVERITY]"*) echo "low" ;;
+    "WEB CONTENT NOTE [INFO]"*) echo "info" ;;
     *) echo "unknown" ;;
   esac
 }
@@ -77,6 +78,9 @@ expected_for_bucket() {
     high|reassembly) echo "high" ;;
     med) echo "medium" ;;
     low) echo "low" ;;
+    # v8.11.0: non-threat notes (topic vocabulary, scan-coverage caveat) — the page
+    # gets an advisory systemMessage but no threat tier and no [LOW] audit line.
+    info) echo "info" ;;
     legit) echo "clean" ;;
     *) echo "unknown" ;;
   esac
@@ -270,6 +274,44 @@ if ! printf '%s' "$trunc_msg" | grep -q 'LOW SEVERITY' \
 else
   FAIL=$((FAIL + 1)); FAILURES+=("oversized clean page still classified LOW (msg='${trunc_msg:0:40}' low=$trunc_log_low info=$trunc_log_info)")
   printf "  ✗ %s\n" "oversized clean page → INFO caveat, not a LOW threat"
+fi
+
+# Topic-vocabulary reclassification (v8.11.0): "prompt injection" is the NAME of an
+# attack class, not an attack — it saturates security docs and was 11 of 18 LOW
+# events in three weeks of the live log, 100% false alarms. Alone it must surface as
+# INFO (no [LOW] audit line, no "content-hiding" warning, no desktop notification),
+# exactly like the v8.9.0 truncation caveat.
+tv_cfg=$(mktemp -d)
+tv_page='This article explains how prompt injection works against LLM agents and how to defend against it.'
+tv_out=$(jq -nc --arg o "$tv_page" '{tool_name:"WebFetch", tool_input:{url:"https://example.test/security"}, tool_response:$o}' \
+  | WEB_SAFETY_CONFIG_DIR="$tv_cfg" CLAUDE_SESSION_ID="tv-$$" "$SCANNER" 2>/dev/null)
+tv_msg=$(printf '%s' "$tv_out" | jq -r '.systemMessage // ""' 2>/dev/null)
+tv_low=$(grep -c '\[LOW\]' "$tv_cfg/web-safety.log" 2>/dev/null); : "${tv_low:=0}"
+tv_info=$(grep -c '\[INFO\]' "$tv_cfg/web-safety.log" 2>/dev/null); : "${tv_info:=0}"
+rm -rf "$tv_cfg"; rm -rf /tmp/web-safety-session-tv-$$-*
+if ! printf '%s' "$tv_msg" | grep -q 'LOW SEVERITY' \
+   && [ "$tv_low" -eq 0 ] && [ "$tv_info" -ge 1 ]; then
+  PASS=$((PASS + 1)); printf "  ✓ %s\n" "topic vocabulary alone → INFO note, not a LOW threat"
+else
+  FAIL=$((FAIL + 1)); FAILURES+=("topic vocab still classified LOW (msg='${tv_msg:0:40}' low=$tv_low info=$tv_info)")
+  printf "  ✗ %s\n" "topic vocabulary alone → INFO note, not a LOW threat"
+fi
+
+# …but a REAL content-hiding finding alongside it must still be a LOW threat, with
+# the topic label riding along in the list (same rule the truncation caveat follows).
+tvm_cfg=$(mktemp -d)
+tvm_page='<div style="opacity:0;">hidden</div> An article about prompt injection defenses.'
+tvm_out=$(jq -nc --arg o "$tvm_page" '{tool_name:"WebFetch", tool_input:{url:"https://example.test/mixed"}, tool_response:$o}' \
+  | WEB_SAFETY_CONFIG_DIR="$tvm_cfg" CLAUDE_SESSION_ID="tvm-$$" "$SCANNER" 2>/dev/null)
+tvm_msg=$(printf '%s' "$tvm_out" | jq -r '.systemMessage // ""' 2>/dev/null)
+tvm_low=$(grep -c '\[LOW\]' "$tvm_cfg/web-safety.log" 2>/dev/null); : "${tvm_low:=0}"
+rm -rf "$tvm_cfg"; rm -rf /tmp/web-safety-session-tvm-$$-*
+if printf '%s' "$tvm_msg" | grep -q 'LOW SEVERITY' && [ "$tvm_low" -ge 1 ] \
+   && printf '%s' "$tvm_msg" | grep -q 'prompt injection'; then
+  PASS=$((PASS + 1)); printf "  ✓ %s\n" "topic vocab + real hiding technique → still LOW, label listed alongside"
+else
+  FAIL=$((FAIL + 1)); FAILURES+=("topic vocab masked a real LOW finding (msg='${tvm_msg:0:60}' low=$tvm_low)")
+  printf "  ✗ %s\n" "topic vocab + real hiding technique → still LOW, label listed alongside"
 fi
 
 # Cap-raise coverage: a ~50KB clean page (between the old 32KB cap and the new 64KB

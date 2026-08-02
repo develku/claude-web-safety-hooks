@@ -2,6 +2,97 @@
 
 All notable changes to this project. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [8.11.0] — 2026-08-01
+
+Two independent false-alarm fixes found by auditing three weeks of the live audit log
+(258 events since v8.10.0). Both are FP-precision changes; neither weakens a threat path.
+
+---
+
+**`prompt injection` is a topic label, not a threat — reclassified LOW → INFO.**
+v8.4.0 downgraded it from MEDIUM to LOW as "a pure label", but LOW still emits a
+"content-hiding techniques detected" warning, a desktop notification, and a `[LOW]` audit
+line that lands in the report's threat counts. In the live log it was **11 of the 18 LOW
+events in three weeks — every one a false alarm**, and every one a page *about* prompt
+injection: `docs.anthropic.com/…/security`, `anthropic.com/engineering/claude-code-sandboxing`,
+`code.claude.com/docs/en/mcp`, agent-framework READMEs. A real attack under that label
+carries its own imperative payload, which `MED_INSTRUCTION_OVERRIDE` /
+`MED_ROLE_MANIPULATION` / Layer 6 catch independently — the bare words add no detection.
+
+### Changed
+
+- **`LOW_TOPIC_VOCAB` matches are now non-threat NOTES**, generalizing the v8.9.0 truncation
+  reclassification: when *every* LOW finding is a note (topic label, scan-coverage caveat, or
+  both), the scanner emits an `INFO` systemMessage and an `[INFO]` audit line — no desktop
+  notification, kept out of the report's HIGH/MEDIUM/LOW threat counts.
+- **A note never masks a real finding.** When any genuine content-hiding technique is also
+  present, the normal LOW path runs unchanged and lists the note alongside it. Regression-tested
+  both ways.
+- New `low_is_topic_vocab` derives the note set from `LOW_TOPIC_VOCAB` itself, so the emit
+  stage cannot drift from the pattern list — the same single-source discipline as
+  `CONTEXT_GATE_REGISTRY` (the v8.5.0 drift bug).
+- Test corpus: `low-prompt-injection-topic.txt` → `info-prompt-injection-topic.txt`, and the
+  harness learned an `info` classification (`classify` + `expected_for_bucket`).
+
+### Tests
+
+- `run-tests.sh` 86 → 88 cases: topic vocabulary alone → INFO; topic vocabulary **+** a real
+  hiding technique → still LOW with the label listed alongside.
+
+---
+
+**Open-redirect hard block was host-blind — a same-origin `?url=` param is not a redirect.**
+The Layer-1 pre-screen blocked *any* URL carrying a redirect-ish parameter whose value started
+with `http(s)://`, without ever comparing the target host to the request host. Since this is a
+**hard** block (allowlist cannot override it), a legitimate same-origin API call was killed
+outright with no recourse: `https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v=…`
+was `PRE-BLOCK`ed twice in the live audit log (2026-05-04, 2026-07-31), which breaks every
+oEmbed / transcript / player-metadata workflow. 2 of the 11 `PRE-BLOCK` events on record were
+this false positive.
+
+The threat the block exists for is the fetcher being **bounced to an attacker-controlled
+host**. A target that *is* the request host cannot bounce off-origin, so the check now
+compares hosts instead of pattern-matching the parameter name.
+
+### Changed
+
+- **`web-safety-approve.sh` open-redirect check is now host-aware.** Each redirect-ish
+  parameter's target is normalized through the shared `normalize_host` (same parser the SSRF
+  classifier uses — no second host-parsing implementation) and compared to the request host.
+  Same host, or a **subdomain** of it → allowed. Anything else → hard block, unchanged.
+- Deliberately **asymmetric**: a *parent*-domain target (`www.a.test/p?url=https://a.test/x`)
+  is still foreign and still blocks. Sibling-subdomain takeover is a real bounce, so the rule
+  mirrors `host_in_list`'s equals-or-subdomain semantics rather than widening to
+  "same registrable domain".
+- Parser discipline: the target authority is read up to the first `/?&#`, so the **outer**
+  URL's own parameters (`&format=json`) are never swallowed into the compared host. **Any**
+  foreign or unparseable target among several parameters blocks the whole URL.
+
+### Security notes
+
+- Fail-safe preserved on every uncertain path: no `normalize_host` available (lib missing),
+  an empty request host, or the `ws-invalid-authority` parser-desync sentinel all fall back
+  to the previous unconditional block.
+- Label-boundary matching means suffix confusion still blocks —
+  `legit.com/p?url=https://legit.com.evil.com/steal` is foreign, not a subdomain.
+- Unchanged: percent-encoded redirect targets (`?url=https%3A%2F%2F…`) were never matched by
+  this regex before or after — they remain covered by the excessive-encoding hard block, and
+  post-redirect re-screening is still the tracked residual documented in
+  [docs/tuning.md](docs/tuning.md).
+- The `while` loop reads from a herestring, not a pipe, so `block_url`'s `exit` terminates the
+  hook rather than being swallowed by a subshell.
+- **Known residual — third-party tools that take a foreign URL as data.** The other live-log
+  FP, `tactiq.io/tools/youtube-transcript?url=https://youtube.com/watch?v=…`, still blocks: its
+  target genuinely *is* a foreign host, and host comparison cannot distinguish "foreign URL as
+  input data" from "foreign URL as redirect destination". Since a hard block ignores the
+  allowlist, such a host has no user-side recourse today. Fixing it needs a separate decision
+  (soft-block downgrade, or an explicit redirect-exempt list) — deliberately out of scope here.
+
+### Tests
+
+- `run-cmd-tests.sh` 54 → 60 cases (now **7 suites · 347 cases**): the two live FP URLs, plus
+  regressions for cross-host, suffix-confusion, parent-domain, and one-foreign-among-many.
+
 ## [8.10.0] — 2026-07-11
 
 **Over-broad jailbreak "mode" patterns — stop benign ops/Linux vocabulary from arming the
