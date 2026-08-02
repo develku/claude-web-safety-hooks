@@ -13,6 +13,7 @@ How to customise the scanner without forking it.
 | `CLAUDE_SESSION_ID` | `$PPID` fallback | Scopes `/tmp/web-safety-session-*` files per Claude session. Set automatically by recent Claude Code versions. Override only for testing (each unique value = isolated state). |
 | `WEB_SAFETY_DEFAULT_ALLOWLIST_DISABLE` | `0` | `1` disables the plugin-shipped Layer-6 default allowlist (`scripts/web-safety-default-allowlist.txt`), falling back to user-file-only exemption. See "Layer 6" below. |
 | `WEB_SAFETY_SUGGEST_THRESHOLD` | `3` | Number of armed-window asks to the **same** host before the guard appends a one-shot `/web-safety:allow <host>` hint to the confirmation. Never auto-adds. |
+| `WEB_SAFETY_SEARCH_QUARANTINE_DISABLE` | `0` | `1` restores the pre-8.12.0 behaviour where a lone MEDIUM on a subagent's `WebSearch` result **kills** that subagent instead of quarantining the result. See "WebSearch quarantine" below. |
 
 Example — disable Layer 5 for a single session:
 
@@ -142,6 +143,7 @@ Entry types:
 - `[CLEARED]` — Layer 5 verifier auto-cleared a false positive (does NOT count toward escalation)
 - `[TRUST-DOWNGRADE]` — the host is on `url-content-trust.txt`, so a `would_be` HIGH/MEDIUM was passed through unredacted (not halted); Layer 6 was still armed. Does NOT count toward escalation. Audit these to confirm your trust list isn't masking a real attack.
 - `[PENDING-KILLED]` — a detection halted a **subagent** (k=v: `epoch= session= agent= severity= tool= url= patterns=`). The kill itself is the containment; this row is what makes it visible — it is what `web-safety-agent-result.sh` joins against to explain the death to the orchestrator and what the Stop gate surfaces to you at turn end. Layer 6 was armed at write time.
+- `[QUARANTINED]` — a lone MEDIUM on a **subagent's `WebSearch`** result (k=v: `epoch= session= agent= severity= tool= hash= lines= patterns=`). The whole result was withheld and the agent kept running — no kill, and deliberately **not** a `[PENDING-KILLED]` row, since Layer 7 would otherwise report a death that never happened. Layer 6 was **not** armed (nothing reached the model). Counts toward escalation as a `Q` strike, but cannot escalate on its own. See "WebSearch quarantine" below.
 - `[SCANNER-ERROR]` — internal error (malformed pattern, system issue); the scanner fails-closed and surfaces a synthetic HIGH-severity hit so the user is alerted
 
 ## False-positive workflow
@@ -156,7 +158,19 @@ If the scanner pauses you on legitimate content:
 
 ## Cross-tool escalation + reassembly tuning
 
-The scanner escalates MEDIUM → HIGH when 3+ calls trigger injection warnings in a 5-minute window. The constants are `SESSION_WINDOW=300` (seconds) and the check `if [ "$SESSION_HITS_NOW" -ge 3 ]` in the MEDIUM branch — since v8 the count is recomputed under the state-file lock at append time (the old script-start read raced under parallel subagents), and strikes are scoped **per agent** when the hook input carries `agent_id` (so independent fan-out agents don't pool their false positives into a fleet-wide ESCALATED; without `agent_id` the v7 whole-session scope applies). Tighten by lowering the threshold; loosen by raising the window. The E8 fragment store stays session-wide regardless — split-payload reassembly is cross-agent content evidence.
+The scanner escalates MEDIUM → HIGH when 3+ calls trigger injection warnings in a 5-minute window. The constants are `SESSION_WINDOW=300` (seconds) and the check `if [ "$SESSION_HITS_NOW" -ge 3 ] && [ "$SESSION_REAL_HITS_NOW" -ge 1 ]` in the MEDIUM branch — since v8 the count is recomputed under the state-file lock at append time (the old script-start read raced under parallel subagents), and strikes are scoped **per agent** when the hook input carries `agent_id` (so independent fan-out agents don't pool their false positives into a fleet-wide ESCALATED; without `agent_id` the v7 whole-session scope applies). Tighten by lowering the threshold; loosen by raising the window. The E8 fragment store stays session-wide regardless — split-payload reassembly is cross-agent content evidence.
+
+Since v8.12.0 the state file's rows carry a status letter — `H` (hit), `C` (auto-cleared false positive), `Q` (quarantined, see below) — and `Q` rows carry a content hash as a 5th field. Two counters come out of the same locked recount: `SESSION_HITS_NOW` is the strike total with `Q` rows **collapsed by hash**, and `SESSION_REAL_HITS_NOW` counts `H` rows only. Escalation requires the second to be ≥ 1, so a window containing nothing but quarantines never escalates — the 3-strike rule is a claim about repeated *model exposure*, and a quarantined result exposed the model to zero bytes. One genuine delivered hit re-arms the whole rule.
+
+## WebSearch quarantine
+
+A lone MEDIUM on a **subagent's** `WebSearch` result does not kill that subagent. The entire result is replaced with a neutral placeholder and the agent continues; the finding keeps its MEDIUM severity, its `[MEDIUM]` audit line, its correlation strike, and its desktop notification, and additionally logs a `[QUARANTINED]` row.
+
+This exists because `WebSearch` is untunable by design. `TOOL_URL` is parsed from `.tool_input.url`, a WebSearch carries `.query`, and **both** `url-allowlist.txt` and `url-content-trust.txt` are host-keyed — so `host_is_content_trusted()` can never fire for a search and there is no per-source escape hatch. Every false positive there cost a subagent, which is why 20 of 27 recorded kills were WebSearch.
+
+Unchanged on purpose: `WebFetch`, the main session (its halt is the one a human actually reads), and HIGH at any tool. Set `WEB_SAFETY_SEARCH_QUARANTINE_DISABLE=1` to restore the kill.
+
+Note that capping the tier instead — treating a lone WebSearch MEDIUM as LOW — is **not** an equivalent relaxation and should not be attempted as a shortcut: the LOW branch emits no `toolResult` at all, so it would pass the suspect content through untouched *and* leave the agent running to act on it. In this scanner the severity tier is also the redaction switch.
 
 Session state is stored at `/tmp/web-safety-session-${SESSION_ID}-state` (correlation; `/tmp/web-safety-session-${SESSION_ID}-agent-<agent_id>-state` inside subagents) and `/tmp/web-safety-session-${SESSION_ID}-fragments` (E8 reassembly excerpts). Both are scoped per Claude Code session via `CLAUDE_SESSION_ID` (or `PPID` fallback). Wipe manually for a clean slate:
 

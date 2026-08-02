@@ -2,6 +2,85 @@
 
 All notable changes to this project. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [8.12.0] — 2026-08-02
+
+**A subagent's WebSearch result is now quarantined instead of killing the agent.**
+
+`WebSearch` is where the kills concentrate: **20 of 27 recorded `[PENDING-KILLED]` rows**
+(17 MEDIUM, 3 HIGH) versus 6 for `WebFetch` and 1 for Bash. Post-v8.10.0 the skew is
+sharper still — 6 of 7. The patterns doing the killing were research vocabulary one per
+kill (`impersonate`, `jailbreak`, `as the developer`, `admin privileges`,
+`guidelines have been updated`, `to verify your identity`) during sessions reading
+advertising-policy and AI-security material.
+
+The reason patterns keep failing here specifically is structural, not lexical.
+`TOOL_URL` is parsed from `.tool_input.url`; a WebSearch carries `.query`, so `TOOL_URL`
+is empty and `host_is_content_trusted()` returns 1 on its first line. **Both** operator
+tuning files are host-keyed, which makes WebSearch the one scanned surface with zero
+tuning recourse — the operator cannot allowlist their way out, so every FP costs a
+subagent. That is why v8.4 → v8.5 → v8.8 → v8.10 each fixed a pattern and the class
+came back.
+
+Decided by cross-model DCA (`20260801T132952`, gpt-5.6-sol at xhigh,
+REFINED-AND-PROCEED). The proposal on the table was a per-tool **severity ceiling**
+(cap a lone WebSearch MEDIUM at LOW); Codex rejected it and constructed the shipped
+design instead. The rejection is worth recording: **the LOW branch emits no
+`toolResult`**, so capping the tier would have passed the suspect payload through
+*verbatim* and kept the agent alive to act on it — strictly worse than the kill it was
+meant to replace. Severity is not a notification level in this scanner; it is also the
+redaction switch.
+
+### Added
+
+- **Quarantine-and-continue for a lone MEDIUM on a subagent's `WebSearch` result.**
+  Everything that carries security value is kept — the MEDIUM severity, the `[MEDIUM]`
+  audit line, the correlation strike, the operator notification — and only the kill is
+  dropped. The **entire** result is replaced with a neutral placeholder, so the agent
+  survives holding none of the suspect content. New `[QUARANTINED]` audit tag (the
+  report auto-tabulates it; deliberately **not** `[PENDING-KILLED]`, or Layer 7 would
+  report a death to the parent that never happened).
+- **Kill switch `WEB_SAFETY_SEARCH_QUARANTINE_DISABLE=1`** restores the pre-8.12.0 kill.
+
+### Changed
+
+- **Escalation now requires at least one non-quarantine hit in the window.** The
+  3-strike rule is a statement about repeated *model exposure*, and a fully-replaced
+  result exposed the model to zero bytes. Codex named the omission its biggest risk:
+  without it, a research fan-out whose every search is quarantined reaches the same kill
+  two searches later and quarantining buys nothing. One genuine delivered hit re-arms
+  the whole rule — 2 quarantines + 1 real MEDIUM still escalates.
+- **Quarantine strikes collapse by content hash.** `record_session_hit` takes an
+  optional hash written as a 5th field on `Q` rows only (old rows lack it and keep
+  counting one-per-row, so the format change is backward-compatible with a state file
+  from a previous version). A subagent that re-runs an identical query gets
+  byte-identical results; that retry loop must not manufacture strikes.
+- **A quarantine does not arm the Layer 6 egress guard.** Arming exists to catch data
+  that reached the model flowing back out; nothing reached it. Note this fires in
+  `bypassPermissions`/`auto`/`dontAsk`, the modes where a subagent MEDIUM *does* arm
+  today — so this is a real behavior change, not a no-op.
+
+### Security
+
+- **Scope is deliberately narrow.** `WebFetch`, the main session, and HIGH are all
+  unchanged. Two reasons: whether a WebSearch `tool_response` is provider-summarized
+  snippets or verbatim page extracts was never established (the DCA's Evidence Pack
+  records this as an admitted gap, fact 12), and the main-session halt is the one place
+  a human actually reads the `stopReason`.
+- **The placeholder relays no matched pattern text to the model** — detector labels can
+  embed matched attacker substrings, so patterns go to the log and the desktop
+  notification only. Regression-tested.
+- Accepted residual: an attacker whose WebSearch results are quarantined three times
+  never escalates. Bounded by the quarantine holding — they also delivered zero bytes,
+  so there is no free probe channel.
+
+### Tests
+
+- `run-tests.sh` 88 → 98 (now **7 suites · 359 cases**). Covers the core survival case,
+  no-pattern-leak, all three unchanged scopes, no-arming, pure-quarantine non-escalation,
+  correlation preserved, hash dedupe, and the kill switch.
+
+---
+
 ## [8.11.0] — 2026-08-01
 
 Two independent false-alarm fixes found by auditing three weeks of the live audit log

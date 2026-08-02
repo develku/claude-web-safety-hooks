@@ -125,8 +125,9 @@ umask 0077
 
 # record_session_hit: append timestamp + tool + URL + status to session state,
 # then recount fresh non-cleared strikes INSIDE the same critical section.
-# Usage: record_session_hit         → records as H (genuine hit)
-#        record_session_hit cleared  → records as C (auto-cleared FP)
+# Usage: record_session_hit              → records as H (genuine hit)
+#        record_session_hit cleared      → records as C (auto-cleared FP)
+#        record_session_hit Q <hash>     → records as Q (quarantined, v8.12.0)
 #
 # The recount lands in SESSION_HITS_NOW (it includes the row just written) and
 # is what the MEDIUM verdict's escalation decision reads. Pre-v8 the count was
@@ -136,9 +137,25 @@ umask 0077
 # spins, then a stale lock (>10s old — a crashed holder, since the hook budget
 # is 10s) is broken; as a last resort append unlocked — fail toward the v7
 # behavior (possible under-escalation), never toward blocking the hook budget.
+#
+# v8.12.0 adds an optional 5th field, the content hash, written only for Q rows.
+# Old rows have no field 5 and keep counting one-per-row, so the format change is
+# backward-compatible with a state file written by a previous version.
+#
+# Two counters come back, because a quarantined hit is weaker evidence than a
+# delivered one and the escalation decision needs to tell them apart:
+#   SESSION_HITS_NOW — the strike total. Q rows COLLAPSE BY HASH (a subagent that
+#     re-runs an identical query gets byte-identical results; that retry loop must
+#     not manufacture strikes), H rows still count one-per-row.
+#   SESSION_REAL_HITS_NOW — H rows only. The escalation branch requires this to be
+#     >= 1, so a window containing nothing but quarantines never escalates: the
+#     3-strike rule measures MODEL EXPOSURE, and a fully-replaced result exposed
+#     the model to zero bytes. Without this, a research fan-out would simply reach
+#     the same kill two searches later and quarantining would buy nothing.
 SESSION_HITS_NOW=0
+SESSION_REAL_HITS_NOW=0
 record_session_hit() {
-  local status="${1:-H}" lock="${SESSION_STATE}.lock" acquired=0 spins=0 now lock_age
+  local status="${1:-H}" hash="${2:-}" lock="${SESSION_STATE}.lock" acquired=0 spins=0 now lock_age
   while [ "$acquired" -eq 0 ]; do
     if mkdir "$lock" 2>/dev/null; then acquired=1; break; fi
     spins=$((spins+1))
@@ -152,8 +169,26 @@ record_session_hit() {
     sleep 0.01
   done
   now=$(date +%s)
-  echo "$now $TOOL_NAME ${TOOL_URL:-no-url} $status" >> "$SESSION_STATE"
-  SESSION_HITS_NOW=$(awk -v cutoff=$((now - SESSION_WINDOW)) '$1 >= cutoff && $4 != "C"' "$SESSION_STATE" 2>/dev/null | wc -l | tr -d ' ')
+  echo "$now $TOOL_NAME ${TOOL_URL:-no-url} $status${hash:+ $hash}" >> "$SESSION_STATE"
+  # One awk pass emits both counters. Q rows key on their hash so duplicates
+  # collapse; a Q row somehow missing its hash falls back to NR so it still
+  # counts once rather than silently vanishing (fail toward counting).
+  read -r SESSION_HITS_NOW SESSION_REAL_HITS_NOW <<< "$(
+    awk -v cutoff=$((now - SESSION_WINDOW)) '
+      $1 >= cutoff && $4 != "C" {
+        if ($4 == "Q") {
+          key = ($5 == "" ? "nr:" NR : "q:" $5)
+          if (key in seen) next
+          seen[key] = 1
+        } else {
+          real++
+        }
+        total++
+      }
+      END { printf "%d %d", total + 0, real + 0 }
+    ' "$SESSION_STATE" 2>/dev/null
+  )"
+  : "${SESSION_HITS_NOW:=0}" "${SESSION_REAL_HITS_NOW:=0}"
   [ "$acquired" -eq 1 ] && rmdir "$lock" 2>/dev/null
 }
 
@@ -1876,6 +1911,68 @@ emit_trust_downgrade() {
   exit 0
 }
 
+# v8.12.0 quarantine-and-continue (DCA 20260801T132952, Option E).
+#
+# A lone MEDIUM on a WebSearch result inside a SUBAGENT used to emit
+# continue:false, which kills that subagent — 20 of 27 recorded kills, nearly all
+# on security-research vocabulary. WebSearch carries .tool_input.query and never
+# .url, so host_is_content_trusted() can never fire for it: it is the only
+# scanned surface with ZERO operator tuning recourse, which is why patching
+# patterns one at a time (v8.4 → v8.5 → v8.8 → v8.10) never converged here.
+#
+# Quarantine keeps every part of the MEDIUM verdict that carries security value —
+# the severity, the audit row, the strike, the operator notification — and drops
+# only the kill. The ENTIRE result is replaced, so the agent survives holding
+# none of the suspect content. Note this is strictly MORE containment than the
+# LOW tier would give: the LOW branch emits no toolResult at all, i.e. it passes
+# the original page through untouched. Capping the tier was the obvious fix and
+# is the wrong one.
+#
+# Deliberately does NOT arm the egress guard: arming exists to catch data that
+# reached the model flowing back out, and a fully-replaced result put zero bytes
+# in front of it. Deliberately does NOT call record_agent_kill: no agent died,
+# and Layer 7 would otherwise report a death to the parent that never happened.
+#
+# Scope is narrow on purpose — WebFetch, the main session, and HIGH are all
+# unchanged. Whether WebSearch returns provider-summarized snippets or verbatim
+# page extracts is still unestablished, and the main-session halt is the one
+# place a human actually reads the stopReason.
+should_quarantine_search() {
+  [ "${WEB_SAFETY_SEARCH_QUARANTINE_DISABLE:-0}" = "1" ] && return 1
+  [ "$TOOL_NAME" = "WebSearch" ] || return 1
+  [ -n "$AGENT_ID" ] || return 1
+  return 0
+}
+
+# Emit the quarantine verdict and exit. patterns is operator-facing only: it goes
+# to the log and the desktop notification, never into the model-facing message or
+# placeholder, because detector labels can embed matched attacker substrings.
+emit_search_quarantine() {
+  local patterns="$1" total_lines content_hash log_patterns
+  total_lines=$(echo "$TOOL_OUTPUT" | wc -l | tr -d ' ')
+  content_hash=$(echo "$TOOL_OUTPUT" | shasum -a 256 | cut -d' ' -f1)
+  log_patterns=$(printf '%s' "$patterns" | tr -d '\000-\037\177' | cut -c1-300)
+
+  echo "[$(date '+%Y-%m-%d %H:%M:%S')] [QUARANTINED] epoch=$(date +%s) session=${CANON_SESSION} agent=${AGENT_ID} severity=MEDIUM tool=${TOOL_NAME} hash=${content_hash:0:12} lines=${total_lines} patterns=[${log_patterns}]" >> "$LOG_FILE"
+  log_detection "MEDIUM" "$patterns"
+  send_notification "MEDIUM" "🔒 Web Safety: search result QUARANTINED [${TOOL_NAME}]" "Patterns: ${patterns//\"/}" "Sosumi" "agent ${AGENT_ID} survived"
+
+  local placeholder
+  placeholder=$(cat <<PLACEHOLDER
+[SEARCH RESULTS QUARANTINED: injection patterns detected]
+Tool: ${TOOL_NAME} | Lines withheld: ${total_lines} | Hash: ${content_hash:0:12}
+Status: ALL results for this search have been withheld. Treat this search as
+having returned nothing at all. Do NOT re-run the identical query — it will be
+quarantined again. Narrow or rephrase it, or tell the user the search was
+blocked and let them review web-safety.log.
+PLACEHOLDER
+)
+  local msg="WEB SAFETY [search result quarantined]: MEDIUM-severity injection patterns were detected in this ${TOOL_NAME} result, so the ENTIRE result was withheld and replaced. You have NOT seen its contents and must not speculate about them. You are still running — continue your task with a different query or report the block to the user. Details are in web-safety.log."
+  jq -n --arg msg "$msg" --arg placeholder "$placeholder" \
+    '{"systemMessage": $msg, "toolResult": $placeholder}'
+  exit 0
+}
+
 # =============================================================================
 # Content sanitization: redact injection lines from tool output
 # =============================================================================
@@ -2345,15 +2442,29 @@ elif [ ${#UNIQUE_MED[@]} -gt 0 ]; then
     emit_trust_downgrade "MEDIUM" "$MED_LIST"
   fi
 
-  record_session_hit
+  # Record the strike BEFORE any enforcement decision, so a quarantined result
+  # still carries its correlation weight into the window (an attacker must not
+  # get a free probe channel by staying under the kill threshold). Quarantine
+  # rows are tagged Q and keyed by content hash — see record_session_hit.
+  if should_quarantine_search; then
+    record_session_hit "Q" "$(echo "$TOOL_OUTPUT" | shasum -a 256 | cut -d' ' -f1)"
+  else
+    record_session_hit
+  fi
 
   # Cross-tool escalation: if 3+ hits in 5 min window, treat as HIGH. The
   # decision reads SESSION_HITS_NOW — the locked post-append recount — not the
   # stale script-start count, so the 3rd strike escalates even when the three
   # scanners run in PARALLEL (the fan-out workload where the old read-then-
   # decide race made every scanner see the same pre-append value).
-  if [ "$SESSION_HITS_NOW" -ge 3 ]; then
-    log_detection "ESCALATED" "session_hits=${SESSION_HITS_NOW} prior_tools=${SESSION_FLAGGED_TOOLS} patterns=$MED_LIST"
+  #
+  # v8.12.0 adds the SESSION_REAL_HITS_NOW >= 1 requirement: escalation is a
+  # statement about repeated MODEL EXPOSURE, and a quarantined result exposed the
+  # model to nothing. Without it, a research fan-out whose every search is
+  # quarantined would reach this kill two searches later and quarantining would
+  # buy nothing. One genuine delivered hit re-arms the whole 3-strike rule.
+  if [ "$SESSION_HITS_NOW" -ge 3 ] && [ "$SESSION_REAL_HITS_NOW" -ge 1 ]; then
+    log_detection "ESCALATED" "session_hits=${SESSION_HITS_NOW} real_hits=${SESSION_REAL_HITS_NOW} prior_tools=${SESSION_FLAGGED_TOOLS} patterns=$MED_LIST"
     record_agent_kill "ESCALATED" "$MED_LIST"
     send_notification "HIGH" "☠️ Web Safety: ESCALATED [${TOOL_NAME}]" "Patterns: ${MED_LIST//\"/}" "Basso" "Flagged tools: ${SESSION_FLAGGED_TOOLS}, ${TOOL_NAME}"
     arm_egress_guard
@@ -2376,6 +2487,14 @@ REASON
       --arg reason "$STOP_REASON" \
       '{"systemMessage": $msg, "continue": false, "stopReason": $reason, "toolResult": $sanitized}'
     exit 0
+  fi
+
+  # v8.12.0: a lone MEDIUM on a subagent's WebSearch result is quarantined rather
+  # than killed. Sits AFTER the escalation check on purpose — once the window
+  # holds a genuine delivered hit, the coordinated-attack signal outranks the
+  # false-positive relief and the escalated kill still fires. Exits.
+  if should_quarantine_search; then
+    emit_search_quarantine "$MED_LIST"
   fi
 
   # Extract content snippets that triggered the match
