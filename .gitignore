@@ -5,3 +5,13 @@ docs/superpowers/plans/
 
 # Session-local runtime scaffolding (scheduled-task locks, etc.) — never tracked.
 .claude/
+
+# Agent-runtime working directories. `.claude/` above already covers one of them; the
+# others arrived later and were untracked AND unignored, which in a PUBLIC repo is one
+# `git add -A` away from publishing them. `.hermes/` alone holds ~1.9 MB of candidate
+# tar.gz archives for the dormant Rust engine, agent working logs, and gate reports —
+# none of it part of the project, all of it reconstructible from the issue tracker.
+.hermes/
+.multica/
+.agent_context/
+.DS_Store
