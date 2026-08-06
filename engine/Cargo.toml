@@ -1,0 +1,39 @@
+[package]
+name = "web-safety-engine"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+description = "Shared low-latency scanner core for the web-safety hooks (Claude Code, Codex, Hermes)"
+license = "MIT"
+publish = false
+
+[lib]
+name = "web_safety_engine"
+path = "src/lib.rs"
+
+[[bin]]
+name = "web-safety-engine"
+path = "src/main.rs"
+
+[dependencies]
+aho-corasick = "1"
+regex = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+base64 = "0.22"
+rusqlite = { version = "0.40", features = ["bundled"] }
+sha2 = "0.10"
+# Already in the tree via rusqlite; named directly for `O_NOFOLLOW` / `O_CLOEXEC`
+# and `geteuid` in `state::paths`, so the filesystem checks are not built out of
+# hand-copied per-target constants.
+libc = "0.2"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
+
+[dev-dependencies]
+rusqlite = { version = "0.40", features = ["bundled"] }

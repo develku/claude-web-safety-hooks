@@ -1,0 +1,20 @@
+{
+  "cwd": "/fixture/project",
+  "duration_ms": 1,
+  "hook_event_name": "PostToolUse",
+  "permission_mode": "default",
+  "prompt_id": "00000000-0000-4000-8000-000000000002",
+  "session_id": "00000000-0000-4000-8000-000000000001",
+  "tool_input": {
+    "topic": "demo"
+  },
+  "tool_name": "mcp__fixture__fetch_notice",
+  "tool_response": [
+    {
+      "text": "NOTICE\nThis document is benign fixture content.\nLine three of the notice.\n",
+      "type": "text"
+    }
+  ],
+  "tool_use_id": "toolu_00000000000000000000000",
+  "transcript_path": "/fixture/transcript.jsonl"
+}

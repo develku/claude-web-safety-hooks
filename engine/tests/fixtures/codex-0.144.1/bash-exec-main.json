@@ -1,0 +1,15 @@
+{
+  "cwd": "/fixture/project",
+  "hook_event_name": "PostToolUse",
+  "model": "gpt-5.1-codex",
+  "permission_mode": "default",
+  "session_id": "00000000-0000-4000-8000-000000000001",
+  "tool_input": {
+    "command": "ls -1"
+  },
+  "tool_name": "Bash",
+  "tool_response": "Chunk ID: 000000\nWall time: 0.0000 seconds\nProcess exited with code 0\nOriginal token count: 10\nOutput:\nREADME.md\nsrc\ntests\n",
+  "tool_use_id": "call_00000000000000000001",
+  "transcript_path": null,
+  "turn_id": "00000000-0000-4000-8000-000000000002"
+}

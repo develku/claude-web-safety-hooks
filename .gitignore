@@ -15,3 +15,9 @@ docs/superpowers/plans/
 .multica/
 .agent_context/
 .DS_Store
+
+# Dormant Rust engine build output — never track. Source (engine/src, engine/tests,
+# engine/corpus) IS tracked; only the compiler's artifacts and the Python linter's
+# cache stay out, so a plain `git add -A` after a build cannot publish binaries.
+engine/target/
+engine/.ruff_cache/

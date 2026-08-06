@@ -2,6 +2,37 @@
 
 All notable changes to this project. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased] — Hermes adapter + Rust engine (STAGED, not shipped)
+
+**Staged / dormant — not a release.** R1 versions the Hermes Agent adapter candidate
+and the shared Rust engine into the repository for the first time. Nothing is
+installed, enabled, trusted, or wired into any hook. `hooks/hooks.json` still runs
+the Bash scanner, which remains the production authority and the rollback path.
+
+### Added
+
+- **`adapters/hermes/` — dormant Hermes Agent 0.20.0 adapter candidate.** A thin
+  Python plugin (`__init__.py` + `plugin.yaml`) that delegates every scan and policy
+  decision to the shared Rust engine over JSON stdin/stdout and rewrites the tool
+  result before the model reads it. Fail-closed: when the engine is missing, times
+  out, or returns anything the host would discard, the result is withheld. Registered
+  hooks: `pre_tool_call`, `transform_tool_result`, `transform_terminal_output`.
+  Not installed, not enabled (see `adapters/hermes/README.md`).
+- **`engine/` — shared Rust scanner core (`web-safety-engine` v0.1.0).** The
+  low-latency scanner and stateful correlation/containment core that the Claude,
+  Codex, and Hermes adapters will all call. Bundled SQLite, pinned exact Rust release
+  via `rust-toolchain.toml`, `Cargo.lock` authoritative. Not wired into any hook;
+  the Bash scanner in `scripts/` remains production.
+- **`docs/rust-core.md` + `docs/state.md`** — the engine's architecture and
+  stateful-core documentation (referenced by `engine/README.md`).
+
+### Rollback
+
+Remove `adapters/hermes/` and `engine/` (and the two `docs/*.md` files) and the repo
+returns to the pre-R1 state; `hooks/hooks.json` never referenced them, so there is no
+hook config to undo. No runtime plugin config, `~/.hermes` tree, trust record, or
+`cli-config.yaml` was touched by R1.
+
 ## [8.12.0] — 2026-08-02
 
 **A subagent's WebSearch result is now quarantined instead of killing the agent.**

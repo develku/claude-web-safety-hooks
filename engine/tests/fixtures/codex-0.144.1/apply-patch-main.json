@@ -1,0 +1,18 @@
+{
+  "cwd": "/fixture/project",
+  "hook_event_name": "PostToolUse",
+  "model": "gpt-5.1-codex",
+  "permission_mode": "default",
+  "session_id": "00000000-0000-4000-8000-000000000001",
+  "tool_input": {
+    "input": "*** Begin Patch\n*** Update File: src/lib.rs\n*** End Patch\n"
+  },
+  "tool_name": "apply_patch",
+  "tool_response": {
+    "output": "Success. Updated the following files:\nM src/lib.rs\n",
+    "success": true
+  },
+  "tool_use_id": "call_00000000000000000003",
+  "transcript_path": null,
+  "turn_id": "00000000-0000-4000-8000-000000000002"
+}

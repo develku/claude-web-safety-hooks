@@ -1,0 +1,14 @@
+name: web-safety
+version: "0.1.0"
+description: >-
+  DORMANT Stage 5C candidate. Delegates every scan and policy decision to the
+  shared Rust web-safety engine over JSON stdin/stdout and rewrites the tool
+  result before the model reads it. Holds no pattern, no severity rule and no
+  normalization step of its own. Fail-closed: when the engine is missing, times
+  out, or returns anything the host would discard, the result is withheld rather
+  than passed through. NOT INSTALLED AND NOT ENABLED — see README.md.
+author: "develku (claude-web-safety-hooks)"
+hooks:
+  - pre_tool_call
+  - transform_tool_result
+  - transform_terminal_output

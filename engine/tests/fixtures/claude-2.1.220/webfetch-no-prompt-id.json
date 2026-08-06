@@ -1,0 +1,22 @@
+{
+  "cwd": "/fixture/project",
+  "duration_ms": 1,
+  "hook_event_name": "PostToolUse",
+  "permission_mode": "default",
+  "session_id": "00000000-0000-4000-8000-000000000001",
+  "tool_input": {
+    "prompt": "what is the page title",
+    "url": "https://example.test/doc"
+  },
+  "tool_name": "WebFetch",
+  "tool_response": {
+    "bytes": 86,
+    "code": 200,
+    "codeText": "OK",
+    "durationMs": 1,
+    "result": "The page title is \"Example Domain.\"\nThis domain is for use in documentation examples.\n",
+    "url": "https://example.test/doc"
+  },
+  "tool_use_id": "toolu_00000000000000000000000",
+  "transcript_path": "/fixture/transcript.jsonl"
+}

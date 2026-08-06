@@ -1,0 +1,9 @@
+# Pinned to an exact release, not `stable`: a floating channel makes every CI
+# run a different compiler, so a new lint or a codegen change upstream lands as
+# an unexplained red build on a commit that did not touch the code. Raise this
+# deliberately, in its own commit, with the differential suites re-run.
+#
+# 1.97.1 is the toolchain the Stage 4 remediation was built and verified on.
+[toolchain]
+channel = "1.97.1"
+components = ["rustfmt", "clippy"]
