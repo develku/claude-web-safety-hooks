@@ -30,6 +30,20 @@ the Bash scanner, which remains the production authority and the rollback path.
   kept as the operator override. Prebuilt binary rejected for the dormant phase. The
   deterministic in-tree path is what makes the fail-closed grey-out diagnosable via an
   out-of-band doctor (M1–M5 failure table in the doc).
+- **R2b: web-tools-only allowlist in the Hermes adapter (disjoint from `security-guidance`).**
+  `transform_tool_result` and `pre_tool_call` now act on **exactly** the allowlisted web
+  ingress/sink tools — exact `web_search`/`web_extract`/`x_search`, the `web_*`,
+  `browser_*`, and `cua_browser_*` families (grounded in Hermes' own `tools/*.py`
+  registry) — and return `None` (pass through untouched) for every other tool. Because
+  the bundled `security-guidance` plugin registers the same two hooks but targets only
+  `write_file`/`patch`/`skill_manage`, the two are provably disjoint under Hermes'
+  first-valid-string-wins dispatch: no tool is in both target sets, so neither can
+  clobber the other. MCP fetch/search tools are server-defined, so they are allowlisted
+  individually by exact wire name via the new `WEB_SAFETY_TOOLS` env override (never by
+  `mcp__` prefix alone). A read-only startup/doctor guard (`_warn_if_coenabled`) logs a
+  warning if both plugins ever appear enabled together — it never enables or changes
+  anything. Smoke: +15 scope/doctor checks (59 total, all pass). Still dormant; nothing
+  installed or activated.
 
 ### Rollback
 

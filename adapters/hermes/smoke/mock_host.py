@@ -204,10 +204,74 @@ def main() -> int:
               bool(res) and isinstance(res[0], str) and res[0].startswith(CONTAINED),
               repr(res[:1]))
 
+        print("\n== 2b. web-tools-only scope (disjoint from security-guidance) ==\n")
+        # web-safety must act on exactly the allowlisted web tools and be silent
+        # on everything else. security-guidance targets write_file/patch/
+        # skill_manage; a non-web tool here must pass through untouched so the
+        # two plugins never race under first-valid-string-wins.
+        for label, tool in (("file write", "write_file"),
+                            ("file patch", "patch"),
+                            ("skill write", "skill_manage"),
+                            ("code exec", "execute_code"),
+                            ("terminal", "terminal"),
+                            ("delegation", "delegate_task")):
+            out = model_sees(tr, PAYLOAD, tool_name=tool,
+                             args={"path": "/tmp/x.ts"}, session_id="s1", task_id="t1")
+            check(f"non-web tool {label!r} passes through untouched",
+                  out == PAYLOAD, repr(out[:60]))
+
+        for label, tool in (("browser navigate", "browser_navigate"),
+                            ("browser snapshot", "browser_snapshot"),
+                            ("typed browser", "cua_browser_navigate"),
+                            ("web extract", "web_extract"),
+                            ("x search", "x_search")):
+            out = model_sees(tr, PAYLOAD, tool_name=tool, args={},
+                             session_id="s1", task_id="t1")
+            check(f"web tool {label!r} is scanned (withholds)",
+                  out.startswith(CONTAINED), repr(out[:60]))
+
+        # pre_tool_call: non-web tools are permitted (no veto) even with a
+        # dangerous-looking target; web tools still veto. The local `veto`
+        # mirrors the first-{action:block} host semantics; `pt` were registered
+        # earlier in leg 1, so define a small helper here rather than depend on
+        # ordering with the later pre_tool_call section.
+        def _pt_veto(**kw):
+            for r in invoke_hook(pt, **kw):
+                if isinstance(r, dict) and r.get("action") == "block":
+                    return r
+            return None
+
+        v = _pt_veto(tool_name="write_file",
+                     args={"path": "/tmpx", "content": "patch.new_string text here"},
+                     task_id="t1")
+        check("pre_tool_call permits a non-web tool (write_file)",
+              v is None, repr(v))
+        v = _pt_veto(tool_name="browser_navigate", args={"url": "file:///etc/passwd"},
+                     task_id="t1")
+        check("pre_tool_call still vetoes a web tool", isinstance(v, dict), repr(v))
+
+        # MCP fetch/search tools are allowlisted explicitly via WEB_SAFETY_TOOLS.
+        saved_tools = os.environ.get("WEB_SAFETY_TOOLS")
+        os.environ["WEB_SAFETY_TOOLS"] = "mcp__nous__fetch"
+        try:
+            out = model_sees(tr, PAYLOAD, tool_name="mcp__nous__fetch", args={},
+                             session_id="s1", task_id="t1")
+            check("MCP fetch tool allowlisted via env is scanned",
+                  out.startswith(CONTAINED), repr(out[:60]))
+            out = model_sees(tr, PAYLOAD, tool_name="mcp__nous__not_a_web_tool",
+                             args={}, session_id="s1", task_id="t1")
+            check("unknown MCP tool (not allowlisted) passes through",
+                  out == PAYLOAD, repr(out[:60]))
+        finally:
+            if saved_tools is None:
+                os.environ.pop("WEB_SAFETY_TOOLS", None)
+            else:
+                os.environ["WEB_SAFETY_TOOLS"] = saved_tools
+
         print("\n== 3. the type contract ==")
         for label, res in (
-            ("clean", invoke_hook(tr, result=CLEAN, tool_name="t")),
-            ("payload", invoke_hook(tr, result=PAYLOAD, tool_name="t")),
+            ("clean", invoke_hook(tr, result=CLEAN, tool_name="web_search")),
+            ("payload", invoke_hook(tr, result=PAYLOAD, tool_name="web_search")),
         ):
             ok = all(isinstance(r, str) for r in res)
             check(f"{label}: every return is str or None (never a dict)", ok, repr(res[:1]))
@@ -279,7 +343,7 @@ def main() -> int:
 
         # (a) engine missing entirely
         cbs = with_engine(str(home / "no-such-engine"))
-        out = model_sees(cbs, CLEAN, tool_name="t")
+        out = model_sees(cbs, CLEAN, tool_name="web_search")
         check("engine missing -> withholds (does NOT pass through)",
               out.startswith(CONTAINED), repr(out[:60]))
 
@@ -289,7 +353,7 @@ def main() -> int:
             """(contained?, seconds, detail) — a hang is a FAIL, never a stall."""
             t0 = time.monotonic()
             try:
-                out = bounded(lambda: model_sees(cbs, CLEAN, tool_name="t"), limit)
+                out = bounded(lambda: model_sees(cbs, CLEAN, tool_name="web_search"), limit)
             except Hung as h:
                 return False, time.monotonic() - t0, f"HUNG: {h}"
             return str(out).startswith(CONTAINED), time.monotonic() - t0, repr(str(out)[:60])
@@ -344,7 +408,7 @@ def main() -> int:
         wrong.write_text('#!/bin/sh\ncat > /dev/null\necho \'{"action":"replace"}\'\n')
         wrong.chmod(0o755)
         cbs = with_engine(str(wrong), timeout="5")
-        out = model_sees(cbs, CLEAN, tool_name="t")
+        out = model_sees(cbs, CLEAN, tool_name="web_search")
         check("wrong-typed engine output -> withholds", out.startswith(CONTAINED),
               repr(out[:60]))
 
@@ -353,7 +417,7 @@ def main() -> int:
         bad.write_text("#!/bin/sh\ncat > /dev/null\nexit 3\n")
         bad.chmod(0o755)
         cbs = with_engine(str(bad))
-        out = model_sees(cbs, CLEAN, tool_name="t")
+        out = model_sees(cbs, CLEAN, tool_name="web_search")
         check("non-zero engine exit -> withholds", out.startswith(CONTAINED), repr(out[:60]))
 
         # (f) garbage on stdout
@@ -361,13 +425,13 @@ def main() -> int:
         junk.write_text("#!/bin/sh\ncat > /dev/null\nprintf 'not json'\n")
         junk.chmod(0o755)
         cbs = with_engine(str(junk))
-        out = model_sees(cbs, CLEAN, tool_name="t")
+        out = model_sees(cbs, CLEAN, tool_name="web_search")
         check("unparseable engine output -> withholds", out.startswith(CONTAINED),
               repr(out[:60]))
 
         # (g) a hook that raises internally must still contain, never pass through
         cbs = with_engine(str(engine))
-        out = model_sees(cbs, 12345, tool_name="t")  # `result` is not a str
+        out = model_sees(cbs, 12345, tool_name="web_search")  # `result` is not a str
         check("a non-string result -> withholds", isinstance(out, str) and CONTAINED in str(out),
               repr(out)[:60] if not isinstance(out, str) else repr(out[:60]))
 
@@ -389,6 +453,54 @@ def main() -> int:
         check("harness survived _kill_group on a same-group child", True)
         check("the child itself was still killed",
               victim.poll() is not None or victim.wait(timeout=5) is not None)
+
+        print("\n== 6b. startup doctor guard (warn only, never enables) ==\n")
+        # `_warn_if_coenabled` reads HERMES_HOME/config.yaml and, if BOTH
+        # web-safety and security-guidance are listed enabled, logs a warning.
+        # It must never raise, never write, and must be silent when only
+        # web-safety is enabled. Drive it with two throwaway homes.
+        import io
+        import logging
+
+        captured = io.StringIO()
+        handler = logging.StreamHandler(captured)
+        wlog = logging.getLogger("web-safety")
+        wlog_level = wlog.level
+        wlog.setLevel(logging.WARNING)
+        wlog.addHandler(handler)
+        saved_home = os.environ.get("HERMES_HOME")
+
+        try:
+            only_ws = Path(tempfile.mkdtemp(prefix="ws-doctor-only-"))
+            (only_ws / "config.yaml").write_text("plugins:\n  enabled:\n    - web-safety\n")
+            os.environ["HERMES_HOME"] = str(only_ws)
+            captured.truncate(0); captured.seek(0)
+            mod._warn_if_coenabled()
+            check("doctor guard stays silent with only web-safety enabled",
+                  captured.getvalue() == "", repr(captured.getvalue()[:80]))
+
+            both = Path(tempfile.mkdtemp(prefix="ws-doctor-both-"))
+            (both / "config.yaml").write_text(
+                "plugins:\n  enabled:\n    - web-safety\n    - security-guidance\n")
+            os.environ["HERMES_HOME"] = str(both)
+            captured.truncate(0); captured.seek(0)
+            mod._warn_if_coenabled()
+            check("doctor guard warns when both are enabled",
+                  "security-guidance" in captured.getvalue(),
+                  repr(captured.getvalue()[:80]))
+
+            # Missing config must not raise.
+            missing = Path(tempfile.mkdtemp(prefix="ws-doctor-none-"))
+            os.environ["HERMES_HOME"] = str(missing)
+            mod._warn_if_coenabled()
+            check("doctor guard tolerates a missing config.yaml", True)
+        finally:
+            wlog.removeHandler(handler)
+            wlog.setLevel(wlog_level)
+            if saved_home is None:
+                os.environ.pop("HERMES_HOME", None)
+            else:
+                os.environ["HERMES_HOME"] = saved_home
 
         print("\n== 7. no security rules live in the adapter ==")
         src = (REPO / "adapters" / "hermes" / "__init__.py").read_text()

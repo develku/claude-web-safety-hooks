@@ -30,6 +30,41 @@ rule, normalization step and state transition stays in the one Rust engine.
 
 Layer 7 splits in two on this host, and only one half is missing.
 
+## Web-tools-only scope (disjoint from security-guidance)
+
+This adapter acts on **exactly** the web ingress/sink tools in its allowlist, and is
+silent on every other tool (the hook returns `None`, so the result passes through
+untouched). That scope is what makes web-safety provably disjoint from Hermes' bundled
+`security-guidance` plugin, which registers the same two hooks
+(`transform_tool_result`, `pre_tool_call`) but targets file-write tools
+(`write_file`, `patch`, `skill_manage`). Under Hermes' **first-valid-string-wins**
+dispatch, two plugins that act on the same result race — whichever callback returns a
+string first owns the result, so either could silently clobber the other's value. Because
+no tool is ever in both plugins' target sets, neither can override the other: coverage is
+disjoint **by construction**, not by luck of hook ordering.
+
+The allowlist is grounded in Hermes 0.20.0's own tool registry (`tools/*.py`):
+
+| Kind | Tools |
+|---|---|
+| exact | `web_search`, `web_extract`, `x_search` |
+| prefix `web_` | future web search/extract tools |
+| prefix `browser_` | `browser_navigate`, `browser_snapshot`, `browser_console`, ... (GUI browser) |
+| prefix `cua_browser_` | typed-browser actions: navigate, click, type, pointer, dialog, state, ... |
+
+MCP fetch/search tools are server-defined (wire name `mcp__<server>__<tool>`) and cannot
+be enumerated here, so they are allowlisted **individually by exact wire name** via
+`WEB_SAFETY_TOOLS` — nothing is ever matched by the `mcp__` prefix alone, which would
+sweep in every non-web MCP tool and break the disjointness property.
+
+**Safety net:** on start, `register()` runs a read-only doctor check
+(`_warn_if_coenabled`). If both web-safety and security-guidance ever appear enabled
+together it logs a diagnostic warning so a future edit that widens either plugin's tool
+scope cannot silently start racing the other. It reads `config.yaml` only, never enables
+or installs anything.
+
+## The three properties this host forces
+
 **Isolation is free.** A `delegate_task` child gets its own session id, and its tool calls
 carry it, so the engine's session scope already separates parent from child. `agent_id`
 mapping to `None` is accurate here, not a gap — Claude needs `agentId` precisely because
@@ -84,6 +119,7 @@ and the reproduction: `engine/tests/fixtures/hermes-0.20.0/README.md`.
 |---|---|---|
 | `WEB_SAFETY_ENGINE` | `<repo>/engine/target/release/web-safety-engine` | explicit binary path |
 | `WEB_SAFETY_TIMEOUT` | `5` | per-scan wall-clock budget, seconds |
+| `WEB_SAFETY_TOOLS` | *(empty)* | comma-separated extra web-tool wire names to allowlist (e.g. MCP fetch/search tools such as `mcp__nous__fetch`) |
 
 PATH is never searched: a binary that merely shares the name is not this engine.
 

@@ -21,3 +21,8 @@ docs/superpowers/plans/
 # cache stay out, so a plain `git add -A` after a build cannot publish binaries.
 engine/target/
 engine/.ruff_cache/
+
+# Python bytecode caches from the dormant Hermes adapter (smoke, py_compile) —
+# regenerated, never source.
+__pycache__/
+*.pyc

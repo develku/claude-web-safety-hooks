@@ -18,6 +18,11 @@ copy of any security rule. Every such decision belongs to the one Rust engine;
 a pattern literal in here would already have broken the one-engine-three-
 runtimes property this stage exists to preserve.
 
+Scope: this adapter acts on the allowlisted WEB tools only (see the
+web-tools-only section below) and is silent on every other tool, which keeps it
+provably disjoint from Hermes' bundled ``security-guidance`` plugin under the
+host's first-valid-string-wins dispatch.
+
 Contract with Hermes Agent 0.20.0 — see
 ``engine/tests/fixtures/hermes-0.20.0/README.md`` for the extraction provenance:
 
@@ -90,6 +95,61 @@ def _deadline() -> float:
 # Refuse to read an unbounded engine response into memory. The engine's own
 # documents are small; anything larger is a malfunction, not a verdict.
 MAX_RESPONSE_BYTES = 1 << 20
+
+# --- web-tools-only scope ---------------------------------------------------
+#
+# web-safety may act on exactly these tools. Every other tool is SKIPPED (the
+# hook returns None and the result passes through untouched), because several
+# plugins share the `transform_tool_result` / `pre_tool_call` hooks and Hermes
+# resolves them FIRST-VALID-STRING-WINS: whichever callback returns a string
+# first owns the result. The bundled `security-guidance` plugin registers the
+# same two hooks but targets file-write tools (`write_file`, `patch`,
+# `skill_manage`). If web-safety were to act on those too, the two plugins
+# would race for the same result and either plugin could silently clobber the
+# other's value. Scoping web-safety to web ingress/sink tools only makes the
+# coverage disjoint from security-guidance BY CONSTRUCTION: no tool is ever in
+# both plugins' target sets, so neither can override the other's output.
+#
+# The set is grounded in Hermes Agent 0.20.0's own tool registry (tools/*.py):
+#
+#   * exact names:   web_search, web_extract, x_search
+#   * prefix family: web_* (future web search/extract tools)
+#   * prefix family: browser_*  (browser_navigate, browser_snapshot,
+#                     browser_console, ... — the GUI browser surface)
+#   * prefix family: cua_browser_* (typed-browser actions: navigate, click,
+#                     type, pointer, dialog, state, ...)
+#
+# MCP fetch/search tools are server-defined (wire name `mcp__<server>__<tool>`)
+# and cannot be enumerated here, so they are allowlisted individually by exact
+# wire name via `WEB_SAFETY_TOOLS` (comma-separated) — see `_extra_web_tools`.
+# Nothing is ever matched by the `mcp__` prefix alone: that would sweep in
+# every non-web MCP tool and break the disjointness property.
+WEB_TOOL_EXACT = frozenset({"web_search", "web_extract", "x_search"})
+WEB_TOOL_PREFIXES = ("web_", "browser_", "cua_browser_")
+
+
+def _extra_web_tools() -> frozenset[str]:
+    """Operator-supplied additional web tool names, e.g. MCP fetch/search tools."""
+    raw = os.environ.get("WEB_SAFETY_TOOLS", "")
+    if not raw:
+        return frozenset()
+    return frozenset(name.strip() for name in raw.split(",") if name.strip())
+
+
+def _is_web_tool(name: str) -> bool:
+    """True only for a web ingress/sink tool the allowlist names.
+
+    Everything else — file ops, terminal, code execution, memory, delegation,
+    messaging — is deliberately OUT of scope: web-safety says nothing about it.
+    """
+    if not isinstance(name, str) or not name:
+        return False
+    if name in WEB_TOOL_EXACT:
+        return True
+    if name.startswith(WEB_TOOL_PREFIXES):
+        return True
+    return name in _extra_web_tools()
+
 
 
 def _engine_path() -> Optional[str]:
@@ -237,6 +297,12 @@ def _kill_group(proc: subprocess.Popen, pgid: Optional[int]) -> None:
 def on_transform_tool_result(**kwargs: Any) -> Optional[str]:
     """`transform_tool_result` — after any tool returns, before the model reads it."""
     try:
+        tool_name = _text(kwargs.get("tool_name")) or ""
+        if not _is_web_tool(tool_name):
+            # Not a web tool — web-safety is silent here. Returning None leaves
+            # the result untouched, and the disjointness allowlist guarantees
+            # this never competes with security-guidance for a shared result.
+            return None
         result = kwargs.get("result")
         if not isinstance(result, str):
             # Absence is not a clean result. The host always passes `result` on
@@ -244,7 +310,7 @@ def on_transform_tool_result(**kwargs: Any) -> Optional[str]:
             # moved and this adapter no longer understands the envelope.
             return CONTAINMENT
         envelope: dict[str, Any] = {
-            "tool_name": _text(kwargs.get("tool_name")) or "unknown",
+            "tool_name": tool_name or "unknown",
             "result": result,
         }
         _carry(envelope, kwargs, "args", dict)
@@ -268,6 +334,14 @@ def on_transform_terminal_output(**kwargs: Any) -> Optional[str]:
         # envelope it did not understand into a clean scan.
         envelope: dict[str, Any] = {"tool_name": "terminal", "output": output}
         _carry(envelope, kwargs, "task_id", str)
+        # First-class passthrough from the `terminal` tool's foreground-output
+        # path (terminal_tool.py:3012): `command` lets the engine see the
+        # actual invocation (e.g. a fetch-shaped `curl`/`wget`) instead of
+        # guessing from the output, and `returncode` distinguishes a clean
+        # result from an errored one. Dropping them here turned a terminal
+        # envelope into one the engine could only judge by output text.
+        _carry(envelope, kwargs, "command", str)
+        _carry(envelope, kwargs, "returncode", int)
         return _scan(envelope)
     except Exception:
         return CONTAINMENT
@@ -302,8 +376,14 @@ def on_pre_tool_call(**kwargs: Any) -> Optional[dict[str, Any]]:
     request run, which is the whole thing Layer 1 exists to prevent.
     """
     try:
+        tool_name = _text(kwargs.get("tool_name")) or ""
+        if not _is_web_tool(tool_name):
+            # Not a web tool — out of scope, and web-safety must not block it.
+            # Returning None permits, and the disjointness allowlist guarantees
+            # this never competes with security-guidance for a shared veto.
+            return None
         envelope: dict[str, Any] = {
-            "tool_name": _text(kwargs.get("tool_name")) or "unknown",
+            "tool_name": tool_name or "unknown",
         }
         _carry(envelope, kwargs, "args", dict)
         _carry(envelope, kwargs, "session_id", str)
@@ -324,6 +404,44 @@ def on_pre_tool_call(**kwargs: Any) -> Optional[dict[str, Any]]:
     return {"action": "block", "message": CONTAINMENT}
 
 
+def _warn_if_coenabled() -> None:
+    """Read-only startup/doctor guard: warn, never enable or change anything.
+
+    web-safety and the bundled `security-guidance` plugin both register
+    `transform_tool_result` and `pre_tool_call`. Under Hermes' first-valid-
+    string-wins dispatch the two are DISJOINT by construction (this adapter is
+    web-tools-only; security-guidance targets file-write tools), so co-enabling
+    them is safe by design. This guard is a cheap safety net: if both ever show
+    up in the enabled lists together it logs a diagnostic line so a future edit
+    that widens either plugin's tool scope cannot silently start racing.
+
+    Reads `HERMES_HOME`/config.yaml only. Never writes, never raises, and
+    specifically never enables, installs, or activates either plugin.
+    """
+    try:
+        home = Path(os.environ.get("HERMES_HOME") or Path.home() / ".hermes")
+        cfg = home / "config.yaml"
+        if not cfg.is_file():
+            return
+        raw = cfg.read_text(encoding="utf-8", errors="replace")
+        # A deliberately dependency-light look for the two plugin ids inside the
+        # `plugins.enabled` list. We only need to know whether BOTH are present;
+        # collapsing whitespace and scanning for the tokens is enough, and it
+        # cannot mis-fire on a comment because plugin ids are unambiguous tokens.
+        norm = " ".join(raw.split())
+        both = "web-safety" in norm and "security-guidance" in norm
+        if both:
+            import logging
+            logging.getLogger("web-safety").warning(
+                "web-safety and security-guidance are both enabled. They are "
+                "disjoint by tool scope (web tools vs file-write tools), so this "
+                "is expected to be safe under first-valid-string-wins — but if "
+                "either plugin's tool scope grows, re-check ordering."
+            )
+    except Exception:
+        return
+
+
 def register(ctx: Any) -> None:
     """Entry point called by Hermes' plugin loader.
 
@@ -337,6 +455,7 @@ def register(ctx: Any) -> None:
     `post_tool_call` is not registered: its return value is ignored by the
     runtime, so it can observe but never enforce.
     """
+    _warn_if_coenabled()
     ctx.register_hook("pre_tool_call", on_pre_tool_call)
     ctx.register_hook("transform_tool_result", on_transform_tool_result)
     ctx.register_hook("transform_terminal_output", on_transform_terminal_output)
