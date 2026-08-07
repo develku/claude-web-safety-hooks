@@ -1,10 +1,12 @@
 # Rust scanner core — architecture
 
-The `engine/` crate is the shared low-latency scanner that Claude Code, Codex,
-and Hermes Agent will eventually all call. It is **not wired into any hook**:
-the Bash scanner in `scripts/` remains the production runtime and the rollback
-path. The Rust core exists so the two can be compared on identical input until
-the port is provably behaviour-preserving.
+The `engine/` crate is the shared low-latency scanner core. Since v9.0.0 it is
+the **production scanner authority for Claude Code**: `hooks/hooks.json`
+invokes `engine/target/release/web-safety-engine` on the PreToolUse and
+PostToolUse hook sites (`--host claude --event pre-tool|post-tool`). The Bash
+scanner in `scripts/` stays in-tree as the **frozen differential oracle** and
+the operator's rollback path — deleting it would break every comparison suite,
+and rewiring `hooks.json` back to the scripts is the rollback.
 
 Current parity: **83/83 payloads agree, zero divergences in either direction**
 (`tests/run-differential.sh`), plus **32 sequences / 73 steps, zero
@@ -461,10 +463,11 @@ Three properties of that layer are load-bearing enough to repeat here:
 * a database whose key shape this build cannot interpret is refused, never read
   on a best-effort basis.
 
-It is **not wired into any hook**. Bash remains the production correlation
-authority; the state layer exists so the two can be compared on identical
-*sequences* the way `run-differential.sh` compares them on identical single
-envelopes.
+Since v9.0.0 the Claude hook sites run it in **report mode**
+(`--state-mode report --state-dir ~/.claude/hooks/engine-state`): transitions
+apply — arming, strikes, the kill ledger — and a state failure is reported
+rather than contained, which is the same fail-open posture the Bash `/tmp`
+arm-files had. `enforce` stays un-wired pending the containment gate below.
 
 ## Codex containment is a block, never a rewrite
 

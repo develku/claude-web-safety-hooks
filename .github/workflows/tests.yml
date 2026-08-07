@@ -72,3 +72,32 @@ jobs:
           test -s toast_block.ps1 || { echo "FAIL: PowerShell block extraction empty"; exit 1; }
           pwsh -NoProfile -Command "\$e=\$null; [void][System.Management.Automation.Language.Parser]::ParseInput((Get-Content -Raw ./toast_block.ps1),[ref]\$null,[ref]\$e); if(\$e){\$e|ForEach-Object{Write-Host \$_.Message}; exit 1}; Write-Host 'OK: toast PowerShell parses cleanly'"
           rm -f toast_block.ps1
+
+  engine:
+    # The Rust engine is the production scanner authority (hooks/hooks.json
+    # invokes engine/target/release/web-safety-engine). Build it exactly as an
+    # operator's install does — pinned toolchain via rust-toolchain.toml,
+    # locked dependencies — then hold it to the same gate as local dev.
+    name: engine (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    defaults:
+      run:
+        working-directory: engine
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build (release, locked — the install step operators run)
+        run: cargo build --release --locked
+
+      - name: Test
+        run: cargo test --locked
+
+      - name: Format check
+        run: cargo fmt --check
+
+      - name: Clippy (deny warnings)
+        run: cargo clippy --all-targets --locked -- -D warnings

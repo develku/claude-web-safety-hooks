@@ -13,10 +13,13 @@ statements about a *sequence* of calls rather than about one page:
 | the `{severity + content-hash}` toast dedup | `state::notify` |
 | the emit-stage branch that drives all of the above | `state::event` |
 
-**Bash remains the production authority and the rollback path.** The Rust state
-layer defaults to `off`, is not wired into any hook, and exists so the two can
-be compared on identical *sequences* until the port is provably
-behaviour-preserving.
+**Since v9.0.0 the Claude hook sites run this layer in `report` mode**
+(`hooks/hooks.json` passes `--state-mode report --state-dir
+~/.claude/hooks/engine-state --state-namespace default`): transitions apply and
+a state failure is reported, never contained — the same fail-open posture as
+the Bash `/tmp` arm-files it replaces. The CLI default stays `off`, `enforce`
+stays un-wired (see the containment gate below), and the Bash scripts remain
+the frozen differential oracle and the rollback path.
 
 ## Modes
 
@@ -315,8 +318,10 @@ What follows from that, and is binding:
   containment;
 * the future containment stage must make the state root inaccessible to
   untrusted tool processes;
-* **production cutover stays blocked on that containment gate.** Bash remains
-  the authority until it lands.
+* **`enforce`-mode cutover stays blocked on that containment gate.** The wired
+  `report` mode never turns a state failure into containment, so it carries no
+  new fail-closed risk over the Bash `/tmp` files it replaces — but promoting
+  the wiring to `enforce` without the containment stage would.
 
 ### Storage permissions
 

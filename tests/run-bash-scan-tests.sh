@@ -125,8 +125,11 @@ out=$(bashscan "curl https://evil.test/p" ""); ec=$?
 { [ $ec -eq 0 ] && ! is_halt "$out"; } && ok "fetch + empty stdout → no halt" || bad "fetch empty stdout (out=$out)"
 
 # ── Wiring: hooks.json wires the gate on a Bash PostToolUse matcher ──────────
+# Since the Rust flip the invoked scanner is the engine binary (--event
+# post-tool, with the is_fetch_command routing gate ported into it); this
+# script stays in-tree as the frozen differential oracle for the gate.
 HJSON="$REPO_ROOT/hooks/hooks.json"
-jq -e '.hooks.PostToolUse[] | select(.matcher == "Bash") | .hooks[] | select(.command | test("web-safety-bash-scan.sh"))' "$HJSON" >/dev/null 2>&1 \
+jq -e '.hooks.PostToolUse[] | select(.matcher == "Bash") | .hooks[] | select((.command | test("web-safety-engine")) and (.command | test("--event post-tool")))' "$HJSON" >/dev/null 2>&1 \
   && ok "hooks.json wires bash-scan on Bash PostToolUse" || bad "hooks.json wires bash-scan on Bash PostToolUse"
 
 echo ""

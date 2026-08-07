@@ -1,9 +1,11 @@
 # Hermes Agent 0.20.0 adapter candidate — DORMANT
 
 Not installed, not enabled, not trusted. Nothing under `~/.hermes/`, no project
-`.hermes/plugins/`, no `cli-config.yaml` and no trust record refers to this directory,
-and `hooks/hooks.json` still runs the Bash scanner. Bash remains both the authority and
-the rollback path.
+`.hermes/plugins/`, no `cli-config.yaml` and no trust record refers to this directory.
+(The engine this adapter calls IS live elsewhere: since v9.0.0 `hooks/hooks.json` wires
+it as the Claude Code scanner authority. That changes nothing here — this adapter stays
+dormant until a Hermes trust record is deliberately created, and the Bash scripts stay
+in-tree as the frozen differential oracle.)
 
 ## Why Python, when the engine is Rust
 

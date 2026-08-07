@@ -2,12 +2,109 @@
 
 All notable changes to this project. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [Unreleased] — Hermes adapter + Rust engine (STAGED, not shipped)
+## [9.0.0] — 2026-08-07 — the Rust engine becomes the production scanner authority
 
-**Staged / dormant — not a release.** R1 versions the Hermes Agent adapter candidate
-and the shared Rust engine into the repository for the first time. Nothing is
-installed, enabled, trusted, or wired into any hook. `hooks/hooks.json` still runs
-the Bash scanner, which remains the production authority and the rollback path.
+**The flip.** `hooks/hooks.json` now invokes the Rust engine
+(`engine/target/release/web-safety-engine`, crate v0.1.0 → **v0.2.0**) on all four
+PreToolUse/PostToolUse hook sites with `--host claude --event pre-tool|post-tool`.
+The Bash scripts are NOT deleted and must not be: they are the **frozen differential
+oracle** every comparison suite runs against, the still-wired **Layer 7 bridge**
+(`web-safety-agent-result.sh`, `web-safety-stop-gate.sh`), and the operator's
+rollback path (rewire `hooks.json` back to the scripts).
+
+### Changed — the flip itself
+
+- **Claude PreToolUse contract certified (the gap that blocked the flip).**
+  `hosts::pre_tool_request` now maps `Host::Claude` instead of refusing it. Field
+  provenance follows the same rule as the certified post-call mapping — the
+  PRODUCTION authority's own reads, not documentation: Layer 1 screens
+  `.tool_input.url // .URL` (exactly `web-safety-approve.sh`'s read); Layer 6 reads
+  the wider `.tool_input.url // .URL // .uri // .href // .urls[0]` plus
+  `.tool_input.command`, `.permission_mode`, `.tool_input.query` (exactly
+  `web-safety-egress.sh`'s reads); identity is `.session_id` + `.prompt_id`. The two
+  URL reads deliberately stay two fields (`ScanRequest.url` vs the new additive
+  `ScanRequest.egress_url`): collapsing them would either over-block (screening a
+  spelling the production screen never saw) or over-ask (hiding an allowlisted
+  destination from the guard). Fixtures: `pretooluse-{webfetch,websearch,bash}.json`
+  under `engine/tests/fixtures/claude-2.1.220/`, provenance documented honestly as
+  **derived from the production Bash authority, not a fresh live capture** (a live
+  capture was attempted 2026-08-07 and blocked on `claude -p` "OAuth session
+  expired"; the fixture README documents the exact upgrade path after re-auth).
+  Locked by `claude_precall_conformance.rs` (17 cases): mapping, verdicts, armed
+  behaviour, fail-closed contract errors. Codex pre-call stays refused-until-certified.
+- **Pre-call encoding reproduces the production Bash documents byte-for-byte.**
+  Layer 1 block → `{"decision":"block","reason":"Pre-screening blocked: <reason>"}`
+  with the screen's own reason vocabulary; Layer 6 → mode-aware exactly like
+  `emit_guard` (ask-honoring modes get `permissionDecision:"ask"` with the ⚠️
+  channel text; `bypassPermissions`/`auto`/`dontAsk` get the hard
+  `{"decision":"block"}` the harness actually honours); permitted web tools get the
+  approve document with the byte-identical "WEB SAFETY MODE ACTIVE" `systemMessage`
+  (the warning is a load-bearing defense layer, not decoration); a permitted `Bash`
+  call gets a no-op `{}` — the Bash hook site is egress-only and must never
+  auto-approve a shell command. The shipped default allowlist is layered under the
+  user file for the Layer 6 exemption only (`--default-allowlist`), and both env
+  kill switches (`WEB_SAFETY_EGRESS_GUARD_DISABLE`,
+  `WEB_SAFETY_DEFAULT_ALLOWLIST_DISABLE`) are honoured.
+- **Layer 8 routing gate ported.** `egress::is_fetch_command` (the
+  `web-safety-lib.sh` predicate, same regex pair) gates the Claude Bash PostToolUse
+  site inside the engine: a non-fetch-shaped command's stdout is never scanned and
+  never touches state, so routine `cat`/`ls`/`grep` output cannot reach a halting
+  scanner. The post-call Claude mapping now carries `.tool_input.command` for this.
+- **State moves from `/tmp` flag files into the engine store — in `report` mode.**
+  The hook sites pass `--state-mode report --state-dir
+  ~/.claude/hooks/engine-state --state-namespace default`: arming, strikes,
+  fragments and the kill ledger all apply, and a state failure is *reported*, never
+  turned into containment — the same fail-open posture as the `/tmp` arm-files it
+  replaces (`enforce` cutover stays blocked on the docs/state.md containment gate).
+- **The audit log keeps all its consumers (new `oplog` module).** The engine writes
+  the same k=v rows to `$CONFIG_DIR/web-safety.log`, byte-compatible with the shell
+  writers and with the same control-strip/bound log-injection hygiene:
+  `[<SEVERITY>]` detection rows (`log_detection`), `[PRE-BLOCK]`,
+  `[EGRESS-ASK]`/`[EGRESS-ASK-FETCH]`/`[EGRESS-SEARCH-DOWNGRADE]`, and
+  `[PENDING-KILLED]` (written when the state ledger records a subagent kill —
+  same field set, so the two Layer 7 Bash consumers and `/web-safety-report` parse
+  on unchanged).
+- **Layer 7 stays a Bash bridge, deliberately.** `web-safety-agent-result.sh` and
+  `web-safety-stop-gate.sh` remain wired: they read the `[PENDING-KILLED]` rows the
+  engine now writes, so their behaviour is unchanged. Porting them to engine
+  subcommands needs (a) certified fixtures for the Agent-resolve and Stop
+  envelopes — the same discipline every other envelope went through — and (b) a
+  session-wide (cross-agent) ledger read the state store does not expose yet. The
+  engine-side ledger (`state::ledger`, one-shot `consume_kills`) is the foundation
+  for that later pass.
+- **Missing-binary behaviour is explicit in `hooks.json`.** Web-tool sites fail
+  **closed** (PreToolUse blocks, PostToolUse withholds via `continue:false`, each
+  naming the `cargo build --release` fix — the Hermes adapter's M2 precedent); the
+  two secondary Bash-matcher sites defer, so ordinary shell work is never paralyzed
+  by an unbuilt engine.
+- **CLI additions:** `--config-dir` env fallback (`WEB_SAFETY_CONFIG_DIR`),
+  `--default-allowlist`, `--audit-log` (defaults to `<config-dir>/web-safety.log`).
+  A bare `scan` without a config dir stays fully deterministic: no lists, no log.
+- **CI gains an engine job** (`.github/workflows/tests.yml`): `cargo build
+  --release --locked` (the operator install step), `cargo test --locked`,
+  `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, on ubuntu +
+  macos. Install docs gain the one-time in-tree build step.
+- **Known deltas vs Bash (tracked, deliberate):** desktop toast notifications are
+  not yet dispatched by the engine (the state layer computes the deduped notify
+  decision; the dispatcher port is follow-up); the one-shot repeat-ask
+  `/web-safety-allow` suggestion tally is not ported; fine-grained
+  `[CLEARED]`/`[CONTEXT-CLEARED]`/`[TRUST-DOWNGRADE]`/`[QUARANTINED]`/`[SANITIZE]`
+  rows are not yet written (cleared findings remain visible via `--emit report`).
+- **Verification gate for this flip:** engine `cargo test` 546 cases green
+  (including the new pre-call conformance and oplog suites); all 7 Bash oracle
+  suites green (their two hooks-wiring assertions updated to expect the engine);
+  `cargo clippy --all-targets -- -D warnings` and `cargo fmt --check` clean;
+  release build `--locked` clean; an 18-point live probe running the **exact
+  `hooks.json` command lines** through `bash -c` on real envelopes against the
+  Bash oracle on identical stdin (verdict + reason + warning parity, armed
+  ask/block behaviour, default-allowlist exemption, routing gate, audit rows), and
+  a real-path probe confirming the state store opens and applies under
+  `~/.claude/hooks/engine-state`. A fresh-session in-harness WebFetch probe
+  remains for the operator (blocked here by the expired OAuth session).
+
+The sections below record the staging history that led here (R1–R5): they were
+written while everything was dormant, and their "not wired into any hook" claims
+were true at staging time and are superseded by this release's flip.
 
 ### Added
 
@@ -71,10 +168,12 @@ the Bash scanner, which remains the production authority and the rollback path.
 
 ### Rollback
 
-Remove `adapters/hermes/` and `engine/` (and the two `docs/*.md` files) and the repo
-returns to the pre-R1 state; `hooks/hooks.json` never referenced them, so there is no
-hook config to undo. No runtime plugin config, `~/.hermes` tree, trust record, or
-`cli-config.yaml` was touched by R1.
+For the v9.0.0 flip: rewire `hooks/hooks.json` back to the Bash scripts (the exact
+pre-flip wiring is in git history at tag/commit for 8.12.0) — the scripts are
+untouched and still pass all 7 suites. The engine's state store
+(`~/.claude/hooks/engine-state/`) can be left in place (Bash never reads it) or
+deleted. The Hermes adapter remains dormant either way: no runtime plugin config,
+`~/.hermes` tree, trust record, or `cli-config.yaml` has ever been touched.
 
 ## [8.12.0] — 2026-08-02
 

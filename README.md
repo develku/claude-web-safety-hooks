@@ -29,70 +29,88 @@ Eight layers, each documented in [docs/patterns.md](docs/patterns.md):
 
 ## Architecture
 
-The plugin is pure shell — no daemon, no dependencies beyond `jq`/`perl`/`shasum`. `hooks/hooks.json` wires each script to a Claude Code tool event; the scripts communicate through session-scoped files in `/tmp`.
+Since v9.0.0 the scanner authority is the **Rust engine** (`engine/`, binary `web-safety-engine`, built in-tree): `hooks/hooks.json` invokes it on the PreToolUse and PostToolUse hook sites with `--host claude --event pre-tool|post-tool`. Cross-step state (Layer 6 arming, strikes, the kill ledger) lives in the engine's SQLite store under `~/.claude/hooks/engine-state/`, run in `report` mode — a state failure is reported, never invented into containment, the same fail-open posture the old `/tmp` arm-files had. The Bash scripts stay in-tree with a different job: they are the **frozen differential oracle** the engine is continuously compared against (83/83 payloads, 32/32 state sequences, plus the pre-call conformance suite), the Layer 7 bridge (below), and the operator's rollback path — rewiring `hooks.json` back to them is the rollback.
 
 ```
 web-safety/
-├── hooks/hooks.json                  # wires scripts → tool events (matchers below)
-├── scripts/
-│   ├── web-safety-approve.sh         # Layer 1   — PreToolUse(web)  URL pre-screen
-│   ├── web-safety-scanner.sh         # Layers 2–5 — PostToolUse(web) scan + sanitize; arms Layer 6
-│   ├── web-safety-egress.sh          # Layer 6   — PreToolUse(Bash) outbound exfiltration guard
-│   ├── web-safety-agent-result.sh    # Layer 7   — PostToolUse(Agent) subagent-kill attribution
-│   ├── web-safety-stop-gate.sh       # Layer 7   — Stop one-shot kill surfacing
-│   ├── web-safety-bash-scan.sh       # Layer 8   — PostToolUse(Bash) fetch-output scan gate
-│   ├── web-safety-verify-context.sh  # Layer 5   — structural-verification helper
+├── hooks/hooks.json                  # wires the ENGINE → tool events (matchers below)
+├── engine/                           # PRODUCTION scanner+state core (web-safety-engine, Rust, build-in-tree)
+├── scripts/                          # frozen Bash oracle + Layer 7 bridge + helpers
+│   ├── web-safety-approve.sh         # Layer 1 oracle — URL pre-screen (ported: engine urlscreen)
+│   ├── web-safety-scanner.sh         # Layers 2–5 oracle — scan + sanitize (ported: engine core)
+│   ├── web-safety-egress.sh          # Layer 6 oracle — outbound exfiltration guard (ported: engine egress)
+│   ├── web-safety-agent-result.sh    # Layer 7 BRIDGE (live) — PostToolUse(Agent) subagent-kill attribution
+│   ├── web-safety-stop-gate.sh       # Layer 7 BRIDGE (live) — Stop one-shot kill surfacing
+│   ├── web-safety-bash-scan.sh       # Layer 8 oracle — fetch-output scan gate (ported: engine is_fetch_command)
+│   ├── web-safety-verify-context.sh  # Layer 5 oracle — structural-verification helper
 │   ├── web-safety-listctl.sh         # backs /web-safety-allow + /web-safety-block
 │   └── web-safety-report.sh          # backs /web-safety-report
 ├── commands/                         # 4 user-invoked slash commands (auto-discovered)
-├── tests/                            # 7 suites · 359 cases · Linux+macOS CI
-└── docs/                             # patterns.md, tuning.md, design specs
+├── adapters/hermes/                  # STAGED, NOT WIRED — dormant Hermes Agent 0.20.0 adapter (Python)
+├── tests/                            # 7 Bash oracle suites · Linux+macOS CI (+ engine: cargo test, 546 cases)
+└── docs/                             # patterns.md, tuning.md, design specs (+ rust-core, state, engine-distribution)
 ```
 
 ### Hook wiring
 
-| Event | Matcher | Script | Layer(s) |
+| Event | Matcher | Invoked | Layer(s) |
 |---|---|---|---|
-| **PreToolUse** | `WebFetch` / `WebSearch` / MCP web tools | `web-safety-approve.sh` → `web-safety-egress.sh` | 1, 6 |
-| **PreToolUse** | `Bash` | `web-safety-egress.sh` | 6 |
-| **PostToolUse** | `WebFetch` / `WebSearch` / MCP web tools | `web-safety-scanner.sh` (10s timeout) | 2–5 (+ arms 6) |
-| **PostToolUse** | `Bash` | `web-safety-bash-scan.sh` (10s timeout) | 8 (gate → 2–5) |
-| **PostToolUse** | `Task` / `Agent` | `web-safety-agent-result.sh` (5s timeout) | 7 |
-| **Stop** | — | `web-safety-stop-gate.sh` (5s timeout) | 7 |
+| **PreToolUse** | `WebFetch` / `WebSearch` / MCP web tools | `web-safety-engine --event pre-tool` | 1, 6 |
+| **PreToolUse** | `Bash` | `web-safety-engine --event pre-tool` | 6 |
+| **PostToolUse** | `WebFetch` / `WebSearch` / MCP web tools | `web-safety-engine --event post-tool` (10s timeout) | 2–5 (+ arms 6) |
+| **PostToolUse** | `Bash` | `web-safety-engine --event post-tool` (10s timeout) | 8 (gate → 2–5) |
+| **PostToolUse** | `Task` / `Agent` | `web-safety-agent-result.sh` (5s timeout) | 7 (Bash bridge) |
+| **Stop** | — | `web-safety-stop-gate.sh` (5s timeout) | 7 (Bash bridge) |
+
+If the engine binary is missing (not yet built), the web hook sites **fail closed** — PreToolUse blocks the fetch and PostToolUse withholds the result, each with a "build the engine" message — while the two secondary Bash-matcher sites defer, so ordinary shell work is never paralyzed by an unbuilt engine. The two Layer 7 sites stay on the Bash scripts deliberately: they read the same `[PENDING-KILLED]` audit rows the engine now writes to `web-safety.log` (byte-compatible k=v contract), and porting their Agent/Stop envelope reads to Rust needs its own fixture certification — the same discipline every other envelope went through.
 
 Layer 6 runs on the web matcher as well as `Bash` (since v7.5.0): while armed, an outbound fetch to a non-allowlisted host is escalated just like a Bash egress command. Since v8.1.0, an exact-match `WebSearch` is the one exception — it has no attacker-chosen destination (the query goes to the search provider, not an arbitrary endpoint), so while armed it is **downgraded**: logged as `[EGRESS-SEARCH-DOWNGRADE]`, not prompted. `WebFetch` and MCP fetch/search tools stay fail-closed.
 
 ### Runtime data flow
 
-Hooks are short-lived processes with no shared memory, so cross-step state lives in session-keyed `/tmp` files (keyed on `${CLAUDE_SESSION_ID:-$PPID}`, so one session never affects another):
+Hooks are short-lived processes with no shared memory, so cross-step state lives in the engine's SQLite store (`~/.claude/hooks/engine-state/state.db`), scoped by runtime + namespace + session (+ task/agent), so one session never affects another:
 
 ```
  fetch requested
       │
       ▼  PreToolUse(web)
- [Layer 1] approve.sh ── block dangerous URL / pass ──► fetch runs
+ [Layer 1] engine --event pre-tool ── block dangerous URL / approve+warning ──► fetch runs
                                                           │
                                                           ▼  PostToolUse(web)
-                            [Layers 2–5] scanner.sh ── scan · sanitize · correlate
-                                   │ writes
-                                   ├─► /tmp/web-safety-session-<id>-state      (hit log → Layer 4 escalation;
-                                   │                                            per-agent ...-agent-<aid>-state in subagents)
-                                   ├─► /tmp/web-safety-session-<id>-fragments  (split-payload reassembly → Layer 4)
-                                   ├─► /tmp/web-safety-session-<id>-armed       (on HIGH/ESCALATED, or a MEDIUM subagent kill in non-interactive mode → arms Layer 6)
-                                   └─► web-safety.log [PENDING-KILLED] row      (on subagent kill → Layer 7)
+                 [Layers 2–5] engine --event post-tool ── scan · sanitize · correlate
+                                   │ writes (state.db)
+                                   ├─► hit log + strikes                      (→ Layer 4 escalation; per-agent scoped)
+                                   ├─► fragment store                         (split-payload reassembly → Layer 4)
+                                   ├─► armed window                           (on HIGH/ESCALATED, or a MEDIUM subagent kill in non-interactive mode → arms Layer 6)
+                                   └─► web-safety.log [PENDING-KILLED] row    (on subagent kill → Layer 7; same k=v row Bash wrote)
                                                           │
- later: a Bash command OR a web fetch ──► PreToolUse(Bash/web)  │ reads
-                            [Layer 6] egress.sh ───────────────────┘
+ later: a Bash command OR a web fetch ──► PreToolUse(Bash/web)  │ reads (state.db)
+                 [Layer 6] engine --event pre-tool ────────────────┘
                                    armed + egress/outbound-fetch + non-allowlisted host → permissionDecision:"ask"
+                                   (hard {decision:"block"} in bypassPermissions/auto/dontAsk, where an ask is discarded)
 
  subagent resolves in parent ──► PostToolUse(Task|Agent)
-                            [Layer 7] agent-result.sh ── fresh [PENDING-KILLED] row for this agentId?
+                 [Layer 7] agent-result.sh ── fresh [PENDING-KILLED] row for this agentId?
                                    → factual additionalContext next to the (empty) result
  turn about to end ──► Stop
-                            [Layer 7] stop-gate.sh ── unsurfaced kill rows? → block ONCE, summarize to user
+                 [Layer 7] stop-gate.sh ── unsurfaced kill rows? → block ONCE, summarize to user
 ```
 
 User-side config and audit live under `~/.claude/hooks/`: `url-allowlist.txt`, `url-blocklist.txt`, and the append-only `web-safety.log`.
+
+## The Rust engine — production scanner authority
+
+Since **v9.0.0**, `engine/` (`web-safety-engine` v0.2.0) is what `hooks/hooks.json` runs. Every pattern, severity rule, normalization step and state transition lives in one Rust crate; the same core serves the certified Codex and Hermes envelope contracts. Exact-released Rust toolchain pinned in `rust-toolchain.toml`, `Cargo.lock` authoritative, SQLite bundled via `rusqlite`'s `bundled` feature. Distribution is **build-in-tree**: source ships, the operator builds once at install (below); `WEB_SAFETY_ENGINE` remains the override for the Hermes adapter. See `engine/README.md`, [docs/rust-core.md](docs/rust-core.md), [docs/state.md](docs/state.md), [docs/engine-distribution.md](docs/engine-distribution.md).
+
+What the flip certified, and how (full detail in [CHANGELOG.md](CHANGELOG.md)):
+
+- **Claude PreToolUse contract** — the pre-call field mapping is certified against the production Bash authority's own `jq` reads (Layer 1's `url`/`URL`; Layer 6's wider `url`/`URL`/`uri`/`href`/`urls[0]`, `command`, `permission_mode`, `query`), with derived fixtures under `engine/tests/fixtures/claude-2.1.220/` whose provenance is documented as **derived, not live-captured** (OAuth blocked a fresh capture; the upgrade path is in that README). A conformance suite (`claude_precall_conformance.rs`) locks the mapping, the mode-aware ask/block escalation, the approve-with-warning document, and the fail-closed contract errors.
+- **Verdict parity with the Bash oracle** — 83/83 payloads, 32/32 state sequences, byte-identical Layer-1 block reasons and approval warning, plus an end-to-end probe of the exact `hooks.json` command lines against the oracle scripts on identical envelopes.
+- **The audit log keeps its consumers** — the engine writes the same k=v rows to `~/.claude/hooks/web-safety.log`: `[<SEVERITY>]` detections, `[PRE-BLOCK]`, `[EGRESS-ASK]`/`[EGRESS-ASK-FETCH]`/`[EGRESS-SEARCH-DOWNGRADE]`, and the `[PENDING-KILLED]` rows the two Layer 7 bridge scripts join on.
+
+**Known deltas vs the Bash pipeline** (deliberate, tracked): desktop toast notifications are not yet re-dispatched by the engine (the state layer computes the deduped notify decision; a dispatcher port is follow-up); the one-shot `/web-safety-allow` repeat-ask suggestion tally is not ported; the fine-grained `[CLEARED]`/`[CONTEXT-CLEARED]`/`[TRUST-DOWNGRADE]`/`[QUARANTINED]`/`[SANITIZE]` rows are not yet written (cleared findings are still visible in `--emit report` output). Rollback at any time: rewire `hooks.json` to the scripts.
+
+**`adapters/hermes/` stays staged, not shipped** — a dormant Hermes Agent 0.20.0 adapter: a thin Python plugin (Python because Hermes' plugin loader requires an importable `__init__.py`; the logic it holds is ≈0) that hands each envelope to this same engine and rewrites the result before the model reads it. Hooks: `pre_tool_call` (Layers 1+6), `transform_tool_result` (Layers 2–5), `transform_terminal_output` (Layer 8). **Fail-closed**: a missing/timed-out/broken engine yields a fixed containment string. Not installed, not enabled, not trusted; see `adapters/hermes/README.md`, doctor: `python3 adapters/hermes/doctor.py`.
 
 ## Install
 
@@ -102,7 +120,13 @@ User-side config and audit live under `~/.claude/hooks/`: `url-allowlist.txt`, `
 /reload-plugins
 ```
 
-That's it. The matchers cover `WebFetch`, `WebSearch`, and a wide set of MCP web tools (Playwright, Puppeteer, Firecrawl, Exa, Context7, MCP Docker variants).
+Then build the engine once (in-tree, pinned toolchain via `rust-toolchain.toml` — the web-tool hook sites fail closed until this binary exists):
+
+```bash
+cd ~/.claude/plugins/cache/develku/web-safety/*/engine && cargo build --release --locked
+```
+
+The matchers cover `WebFetch`, `WebSearch`, and a wide set of MCP web tools (Playwright, Puppeteer, Firecrawl, Exa, Context7, MCP Docker variants).
 
 ## Quick start
 
@@ -143,13 +167,15 @@ Four slash commands ship with the plugin (auto-discovered on install). All are u
 ## Requirements
 
 - Claude Code CLI
-- `jq`, `bash` 3.2+, `perl`, `shasum`
+- **Rust toolchain (rustup)** — one `cargo build --release --locked` at install builds the scanner engine from the pinned toolchain; no runtime Rust dependency after that
+- `jq`, `bash` 3.2+, `perl`, `shasum` — for the Layer 7 bridge scripts, the slash-command helpers, and the frozen differential oracle
 - macOS, Linux, or Windows for desktop notifications — macOS via `osascript`, Linux via `notify-send` (libnotify) with best-effort sound (`canberra-gtk-play`/`paplay`/`pw-play`), Windows via a WinRT toast through `powershell.exe` (Git Bash / WSL); detection itself needs none of these and runs anywhere
 
 ## Update log
 
 Full per-version detail in [CHANGELOG.md](CHANGELOG.md). Recent releases:
 
+- **9.0.0** — **The Rust engine becomes the production scanner authority.** `hooks/hooks.json` now invokes `engine/target/release/web-safety-engine` (`--host claude`) on all four PreToolUse/PostToolUse hook sites; the Bash scripts stay in-tree as the frozen differential oracle, the Layer 7 bridge, and the rollback path. What made the flip possible: the **Claude PreToolUse contract was certified** — the mapping reads exactly the fields the production Bash hooks have been reading live for months (Layer 1's `url`/`URL`; Layer 6's wider `url`/`URL`/`uri`/`href`/`urls[0]`, `command`, `permission_mode`, `query`; identity via `session_id`/`prompt_id`), locked by derived fixtures whose provenance is documented honestly (`engine/tests/fixtures/claude-2.1.220/README.md`: derived from the Bash authority — a live capture was blocked on expired OAuth, with the upgrade path documented) and a 17-case conformance suite. The engine reproduces the Bash documents byte-for-byte where the model or harness reads them: the `Pre-screening blocked:` reasons, the approve-with-warning `systemMessage`, the mode-aware egress `ask`→hard-`block` escalation in `bypassPermissions`/`auto`/`dontAsk`, the shipped default-allowlist layering, both env kill switches, and the Layer 8 `is_fetch_command` routing gate. Cross-step state moves from `/tmp` flag files into the engine's SQLite store (`~/.claude/hooks/engine-state/`, `report` mode — a state failure is reported, never contained, the `/tmp` files' own fail-open posture). The audit log keeps every consumer alive: the engine writes the same `[<SEVERITY>]`, `[PRE-BLOCK]`, `[EGRESS-ASK*]`, `[EGRESS-SEARCH-DOWNGRADE]` and `[PENDING-KILLED]` k=v rows, so `/web-safety-report` and the two (still-Bash) Layer 7 hooks read on unchanged. Missing binary fails **closed** on the web-tool sites (block/withhold with a build instruction) and defers on the secondary Bash-matcher sites. Engine crate v0.1.0 → v0.2.0; CI gains a `cargo build --release --locked` + test + fmt + clippy job; install gains the one-time in-tree build. Known deltas (tracked): desktop toasts and the repeat-ask allowlist hint are not yet re-dispatched by the engine; fine-grained `[CLEARED]`/`[QUARANTINED]`-class rows not yet written. Gate: engine 546 cases green, 7 Bash oracle suites green, clippy `-D warnings` + fmt clean, and an 18-point live probe of the exact hook command lines against the Bash oracle on identical envelopes.
 - **8.12.0** — **A subagent's WebSearch result is quarantined, not killed.** `WebSearch` is where the kills concentrate: **20 of 27 recorded `[PENDING-KILLED]` rows** (17 MEDIUM, 3 HIGH) vs 6 WebFetch and 1 Bash — post-8.10.0, 6 of 7 — on research vocabulary one per kill (`impersonate`, `jailbreak`, `as the developer`, `admin privileges`, `guidelines have been updated`). The reason patterns keep failing *here specifically* is structural: `TOOL_URL` is parsed from `.tool_input.url` and a WebSearch carries `.query`, so `host_is_content_trusted()` returns on its first line and **both** tuning files are host-keyed — WebSearch is the one scanned surface with **zero operator tuning recourse**, which is why v8.4 → v8.5 → v8.8 → v8.10 each fixed a pattern and the class came back. Now a lone MEDIUM there keeps everything that carries security value (severity, `[MEDIUM]` audit line, correlation strike, notification) and drops only the kill: the **entire** result is replaced with a neutral placeholder and the agent survives holding none of it, logged as `[QUARANTINED]` (deliberately not `[PENDING-KILLED]`, or Layer 7 would report a death that never happened). Decided by cross-model DCA (`20260801T132952`, gpt-5.6-sol xhigh, REFINED-AND-PROCEED) — the proposal was a per-tool **severity ceiling** (lone WebSearch MEDIUM → LOW) and Codex rejected it: **the LOW branch emits no `toolResult`**, so capping the tier would have passed the payload through *verbatim* and kept the agent alive to act on it, strictly worse than the kill. Severity here is also the redaction switch, not just a notification level. Two guards keep the fix from being cosmetic: escalation now requires **≥1 hit that actually reached the model** (otherwise a fan-out reaches the same kill two searches later — Codex's stated biggest risk), and quarantine strikes **collapse by content hash** so an identical-query retry can't manufacture them. A quarantine does **not** arm Layer 6 (nothing reached the model to flow back out) — a real change, since a subagent MEDIUM does arm in `bypassPermissions`/`auto`/`dontAsk`. Scope is narrow on purpose: WebFetch, the main session, and HIGH are unchanged, because whether a WebSearch `tool_response` is provider-summarized or verbatim was never established, and the main-session halt is the one place a human reads the `stopReason`. Accepted residual: three quarantines alone never escalate — bounded by the quarantine holding. Kill switch `WEB_SAFETY_SEARCH_QUARANTINE_DISABLE=1`. Scanner suite 88 → 98 (now 7 suites · 359 cases).
 - **8.11.0** — **`prompt injection` is a topic label, not a threat — reclassified LOW → INFO.** v8.4.0 downgraded it MEDIUM → LOW as "a pure label", but LOW still emits a "content-hiding techniques detected" warning, a desktop notification, and a `[LOW]` audit line inside the report's threat counts. Three weeks of the live log: **11 of 18 LOW events, all false alarms**, every one a page *about* prompt injection (`docs.anthropic.com/…/security`, `anthropic.com/engineering/claude-code-sandboxing`, `code.claude.com/docs/en/mcp`, agent-framework READMEs). A real attack under that label carries its own imperative payload, caught independently by `MED_INSTRUCTION_OVERRIDE`/`MED_ROLE_MANIPULATION`/Layer 6 — the bare words add no detection. Generalizing the v8.9.0 truncation reclassification: when *every* LOW finding is a non-threat NOTE (topic label, scan-coverage caveat, or both), the scanner emits `INFO` — no notification, `[INFO]` audit line kept out of the threat counts. **A note never masks a real finding** — with any genuine hiding technique present the LOW path runs unchanged and lists the label alongside it (regression-tested both ways). New `low_is_topic_vocab` derives the note set from `LOW_TOPIC_VOCAB` itself, so the emit stage can't drift from the pattern list (same discipline that fixed the v8.5.0 drift bug). Scanner suite 86 → 88.
 - **8.11.0** — **Open-redirect hard block was host-blind — a same-origin `?url=` param is not a redirect.** The Layer-1 pre-screen blocked *any* URL carrying a redirect-ish parameter starting with `http(s)://`, never comparing the target host to the request host. Because this is a **hard** block (allowlist cannot override), a legitimate same-origin API call died with no recourse: `youtube.com/oembed?url=youtube.com/watch?v=…` was `PRE-BLOCK`ed twice in the live log (2026-05-04, 2026-07-31) — 2 of the 11 `PRE-BLOCK` events on record — breaking every oEmbed/transcript workflow. The threat the block exists for is being **bounced to an attacker-controlled host**, and a same-origin target cannot bounce, so the check now compares hosts via the shared `normalize_host` (same parser as the SSRF classifier — no second host implementation): same host or a **subdomain** of it passes, anything else hard-blocks as before. Deliberately **asymmetric** — a *parent*-domain target still blocks (sibling-subdomain takeover is a real bounce), mirroring `host_in_list`'s equals-or-subdomain rule rather than widening to "same registrable domain". Fail-safe on every uncertain path (no lib, empty host, `ws-invalid-authority` sentinel → unconditional block); label-boundary matching keeps suffix confusion (`legit.com.evil.com`) blocked; the outer URL's own `&params` are not swallowed into the compared host, and any one foreign target among several blocks the whole URL. `run-cmd-tests.sh` 54 → 60 (now 7 suites · 347 cases).

@@ -1,5 +1,5 @@
 {
-  "description": "Web safety hooks — URL pre-screening + prompt-injection scanner for web-fetching tools",
+  "description": "Web safety hooks — URL pre-screening + prompt-injection scanner for web-fetching tools. Scanner authority: the Rust engine (engine/, built in-tree via `cargo build --release`); the Bash scripts remain as the frozen differential oracle, and as the Layer 7 bridge (agent-result + stop-gate) reading the engine's audit rows.",
   "hooks": {
     "PreToolUse": [
       {
@@ -7,11 +7,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "${CLAUDE_PLUGIN_ROOT}/scripts/web-safety-approve.sh"
-          },
-          {
-            "type": "command",
-            "command": "${CLAUDE_PLUGIN_ROOT}/scripts/web-safety-egress.sh"
+            "command": "E=\"${CLAUDE_PLUGIN_ROOT}/engine/target/release/web-safety-engine\"; if [ -x \"$E\" ]; then exec \"$E\" scan --host claude --event pre-tool --config-dir \"${WEB_SAFETY_CONFIG_DIR:-$HOME/.claude/hooks}\" --default-allowlist \"${CLAUDE_PLUGIN_ROOT}/scripts/web-safety-default-allowlist.txt\" --state-mode report --state-dir \"${WEB_SAFETY_CONFIG_DIR:-$HOME/.claude/hooks}/engine-state\" --state-namespace default; else printf '%s' '{\"decision\":\"block\",\"reason\":\"web-safety: engine binary missing (fail-closed). Build it: cargo build --release in the plugin engine/ directory.\"}'; fi"
           }
         ]
       },
@@ -20,7 +16,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "${CLAUDE_PLUGIN_ROOT}/scripts/web-safety-egress.sh"
+            "command": "E=\"${CLAUDE_PLUGIN_ROOT}/engine/target/release/web-safety-engine\"; [ -x \"$E\" ] || exit 0; exec \"$E\" scan --host claude --event pre-tool --config-dir \"${WEB_SAFETY_CONFIG_DIR:-$HOME/.claude/hooks}\" --default-allowlist \"${CLAUDE_PLUGIN_ROOT}/scripts/web-safety-default-allowlist.txt\" --state-mode report --state-dir \"${WEB_SAFETY_CONFIG_DIR:-$HOME/.claude/hooks}/engine-state\" --state-namespace default"
           }
         ]
       }
@@ -31,7 +27,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "${CLAUDE_PLUGIN_ROOT}/scripts/web-safety-scanner.sh",
+            "command": "E=\"${CLAUDE_PLUGIN_ROOT}/engine/target/release/web-safety-engine\"; if [ -x \"$E\" ]; then exec \"$E\" scan --host claude --event post-tool --config-dir \"${WEB_SAFETY_CONFIG_DIR:-$HOME/.claude/hooks}\" --state-mode report --state-dir \"${WEB_SAFETY_CONFIG_DIR:-$HOME/.claude/hooks}/engine-state\" --state-namespace default; else printf '%s' '{\"continue\":false,\"stopReason\":\"web-safety: engine binary missing — this tool result was withheld fail-closed. Build the engine: cargo build --release in the plugin engine/ directory.\"}'; fi",
             "timeout": 10000
           }
         ]
@@ -41,7 +37,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "${CLAUDE_PLUGIN_ROOT}/scripts/web-safety-bash-scan.sh",
+            "command": "E=\"${CLAUDE_PLUGIN_ROOT}/engine/target/release/web-safety-engine\"; [ -x \"$E\" ] || exit 0; exec \"$E\" scan --host claude --event post-tool --config-dir \"${WEB_SAFETY_CONFIG_DIR:-$HOME/.claude/hooks}\" --state-mode report --state-dir \"${WEB_SAFETY_CONFIG_DIR:-$HOME/.claude/hooks}/engine-state\" --state-namespace default",
             "timeout": 10000
           }
         ]
