@@ -69,6 +69,30 @@ already uses it). It is an override of the default, not a replacement for it.
 
 ---
 
+## Implementation status (R3)
+
+**Mechanism: IMPLEMENTED + VERIFIED, staged/dormant — local commit only, no enable, no push.**
+
+The build-in-tree mechanism is not new code to write; it is the resolve order
+already present in `adapters/hermes/__init__.py::_engine_path()`, which this stage
+confirms is the distributed mechanism and verifies against the real in-tree build:
+
+- **Resolve order = exactly as specified** (`adapters/hermes/__init__.py:150-165`):
+  `WEB_SAFETY_ENGINE` override first; else the deterministic in-tree default
+  `<repo>/engine/target/release/web-safety-engine`; PATH is never searched.
+- **Verified against the real build** (toolchain `1.97.1` matches the pinned
+  `rust-toolchain.toml`; binary present and executable):
+  - no override ⇒ resolves to the in-tree build path (exists + `X_OK`) ✓
+  - bogus override ⇒ returns `None` → `CONTAINMENT` (fail-closed, M1) ✓
+  - valid override ⇒ prefer the operator path ✓
+  - engine `info` healthy (`schema_version:1`, `version:0.1.0`) ✓
+- **Grey-out stays uniform.** `_scan()` returns the single fixed `CONTAINMENT` string
+  (never `None`) on every failure; the string never says *why*. Diagnosability is
+  out-of-band by construction — an out-of-band doctor reproduces `_engine_path()`
+  and probes the resolved binary across the M1–M5 table below.
+
+---
+
 ## Why build-in-tree
 
 ### Diagnosability — the decisive axis
