@@ -330,6 +330,53 @@ def main() -> int:
               isinstance(v, dict), repr(v)[:60])
         os.environ["WEB_SAFETY_ENGINE"] = saved
 
+        print("\n== 4c. pre_tool_call scoping: fails closed ONLY on covered tools ==\n")
+        # The four-way matrix for the scoping contract. on_pre_tool_call gates
+        # on _is_web_tool() BEFORE touching the engine (L379-384), so an engine
+        # blip must fail CLOSED for a covered web tool and must be a no-op for a
+        # non-covered tool (which never reaches _scan at all). Both directions
+        # are load-bearing: covering too little opens an ingress hole; covering
+        # too much (or failing open on the covered set) defeats the guard.
+        def _decision(**kw):
+            """The host blocks on the FIRST {"action":"block"}; else permits."""
+            for r in invoke_hook(pt, **kw):
+                if isinstance(r, dict) and r.get("action") == "block":
+                    return "block"
+            return "permit"
+
+        good_engine = os.environ.get("WEB_SAFETY_ENGINE", "")
+        blip_engine = str(home / "no-such-engine")  # engine missing -> _scan -> CONTAINMENT
+
+        # (i) covered tool + engine blip           -> FAIL CLOSED (block)
+        os.environ["WEB_SAFETY_ENGINE"] = blip_engine
+        d = _decision(tool_name="web_search", args={"url": "https://example.com/ok"},
+                      task_id="t1")
+        check("covered tool (web_search) + engine blip -> BLOCKS (fail-closed)",
+              d == "block", repr(d))
+
+        # (ii) non-covered tool + engine blip      -> does NOT fail (no scan)
+        for label, tool in (("file write", "write_file"),
+                            ("terminal", "terminal"),
+                            ("file patch", "patch"),
+                            ("code exec", "execute_code"),
+                            ("memory", "memory"),
+                            ("delegation", "delegate_task")):
+            d = _decision(tool_name=tool, args={"path": "/tmp/x"}, task_id="t1")
+            check(f"non-covered tool ({label}) + engine blip -> permits, never scanned",
+                  d == "permit", repr(d))
+
+        # (iii) covered tool + clean engine + clean url -> permits
+        os.environ["WEB_SAFETY_ENGINE"] = good_engine
+        d = _decision(tool_name="web_search", args={"url": "https://example.com/ok"},
+                      task_id="t1")
+        check("covered tool + clean engine + clean url -> permits",
+              d == "permit", repr(d))
+
+        # (iv) non-covered tool + clean engine      -> permits
+        d = _decision(tool_name="write_file", args={"path": "/tmp/x"}, task_id="t1")
+        check("non-covered tool + clean engine -> permits",
+              d == "permit", repr(d))
+
         print("\n== 5. fail-closed paths ==")
 
         # The adapter reads both settings per call, so the SAME loaded callbacks

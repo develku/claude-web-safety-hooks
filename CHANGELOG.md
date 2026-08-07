@@ -48,6 +48,16 @@ the Bash scanner, which remains the production authority and the rollback path.
   warning if both plugins ever appear enabled together — it never enables or changes
   anything. Smoke: +15 scope/doctor checks (59 total, all pass). Still dormant; nothing
   installed or activated.
+- **R5: pre_tool_call fails closed only on allowlisted tools — verified by a 4-way
+  matrix.** The scoping gate (`on_pre_tool_call` returning early `None` before any
+  `_scan` for non-web tools) is locked by four independent smoke cases: covered tool +
+  engine blip → **blocks** (fail-closed); non-covered tool + engine blip → **permits**
+  (never reaches the engine); covered tool + clean engine + clean URL → permits; and
+  non-covered tool + clean engine → permits. This pins down both directions of the
+  contract — covering too little opens an ingress hole, covering too much (or failing
+  open on the covered set) defeats the guard. New smoke section 4c (+9 checks, 68
+  total, all pass). Adapter code was already landed in R2b; this is the dedicated R5
+  regression commit. Still dormant; nothing installed or activated.
 
 ### Rollback
 
