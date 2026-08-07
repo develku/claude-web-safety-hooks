@@ -19,6 +19,7 @@ Nothing here needs a model, a network, an account, or a Hermes session.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import shutil
@@ -203,6 +204,41 @@ def main() -> int:
         check("terminal output is withheld",
               bool(res) and isinstance(res[0], str) and res[0].startswith(CONTAINED),
               repr(res[:1]))
+
+        print("\n== 2a. terminal envelope carries command + returncode (R4) ==\n")
+        # `transform_terminal_output` receives `command` and `returncode` from the
+        # host (terminal_tool.py:3009-3014) exactly as it receives `output`. The
+        # adapter must forward them as first-class envelope fields so the engine
+        # can discriminate fetch-shaped commands from other terminal output without
+        # guessing. Point the engine at a shim that writes the envelope it received
+        # to a file, then assert both fields survived the adapter.
+        r4_capture = home / "r4-envelope.json"
+        r4_shim = home / "r4-shim.sh"
+        r4_shim.write_text(
+            f"#!/bin/sh\ncat > {r4_capture}\nprintf 'null'\n"
+        )
+        r4_shim.chmod(0o755)
+        r4_saved = os.environ.get("WEB_SAFETY_ENGINE")
+        os.environ["WEB_SAFETY_ENGINE"] = str(r4_shim)
+        try:
+            invoke_hook(tt, command="curl https://ex.test", output=CLEAN,
+                        returncode=0, task_id="", env_type="local")
+            cap = json.loads(r4_capture.read_text()) if r4_capture.exists() else {}
+            check("command carried into the terminal envelope",
+                  cap.get("command") == "curl https://ex.test", repr(cap)[:120])
+            check("returncode carried into the terminal envelope",
+                  cap.get("returncode") == 0, repr(cap)[:120])
+            # returncode is optional-typed; a non-int drift must not be forwarded.
+            invoke_hook(tt, command="ls", output=CLEAN, returncode="notanint",
+                        task_id="", env_type="local")
+            cap2 = json.loads(r4_capture.read_text()) if r4_capture.exists() else {}
+            check("a non-int returncode is dropped, not forwarded",
+                  "returncode" not in cap2, repr(cap2)[:120])
+        finally:
+            if r4_saved is None:
+                os.environ.pop("WEB_SAFETY_ENGINE", None)
+            else:
+                os.environ["WEB_SAFETY_ENGINE"] = r4_saved
 
         print("\n== 2b. web-tools-only scope (disjoint from security-guidance) ==\n")
         # web-safety must act on exactly the allowlisted web tools and be silent

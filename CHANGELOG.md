@@ -58,6 +58,16 @@ the Bash scanner, which remains the production authority and the rollback path.
   open on the covered set) defeats the guard. New smoke section 4c (+9 checks, 68
   total, all pass). Adapter code was already landed in R2b; this is the dedicated R5
   regression commit. Still dormant; nothing installed or activated.
+- **R4: `transform_terminal_output` carries `command` + `returncode` into the envelope
+  (first-class, not guessed).** The host passes `command` and `returncode` to this hook
+  exactly as it passes `output`; the adapter now forwards them so the engine can
+  discriminate fetch-shaped commands (a `curl`/`wget`) from other terminal output
+  without inferring from the text. Adapter code was already landed in R2b
+  (`_carry(envelope, kwargs, "command"/"returncode")`); this commit adds the R4
+  regression that proves it: a shim engine captures the envelope and the smoke asserts
+  `command` and `returncode` survived the adapter, and that a wrong-typed `returncode`
+  is dropped (never forwarded). New smoke section 2a (+3 checks, 71 total). Still
+  dormant; nothing installed or activated.
 
 ### Rollback
 
