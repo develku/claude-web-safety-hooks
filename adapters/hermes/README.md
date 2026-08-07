@@ -123,6 +123,31 @@ and the reproduction: `engine/tests/fixtures/hermes-0.20.0/README.md`.
 
 PATH is never searched: a binary that merely shares the name is not this engine.
 
+## Diagnostic (doctor)
+
+The adapter fails CLOSED: when the engine is missing, not executable, times out, or
+returns anything the host would discard, every web tool result becomes the fixed
+`CONTAINMENT` string — and that string is deliberately uniform, never saying *why*.
+The *why* lives in an out-of-band command, run on purpose, never in a tool result:
+
+```bash
+python3 adapters/hermes/doctor.py          # or ./adapters/hermes/doctor.py
+```
+
+It reproduces the adapter's exact engine resolution (`_engine_path()`) and walks the
+M1–M5 failure table from `docs/engine-distribution.md`, ending with a HEALTHY result or
+a concrete fail-closed cause plus the exact shell command to fix it:
+
+| # | Cause | Doctor checks | Remediation it prints |
+|---|---|---|---|
+| M1 | `WEB_SAFETY_ENGINE` set but bad | path exists? `+x`? | unset it / fix the path |
+| M2 | in-tree engine not built | expected file present? | `cd engine && cargo build --release` |
+| M3 | in-tree engine not `+x` | exec bit off? | `chmod +x …/web-safety-engine` |
+| M4 | built but broken at runtime | `info` runs? probe scan? | `cd engine && cargo build --release --locked` |
+| M5 | contract/toolchain drift | `info` schema_version ≠ 1 | rebuild pinned; bump `contract.rs` deliberately |
+
+Honors the same environment as the adapter: `WEB_SAFETY_ENGINE`, `WEB_SAFETY_TIMEOUT`.
+
 ## Smoke
 
 ```bash

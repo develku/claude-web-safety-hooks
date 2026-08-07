@@ -30,6 +30,10 @@ the Bash scanner, which remains the production authority and the rollback path.
   kept as the operator override. Prebuilt binary rejected for the dormant phase. The
   deterministic in-tree path is what makes the fail-closed grey-out diagnosable via an
   out-of-band doctor (M1–M5 failure table in the doc).
+- **`adapters/hermes/doctor.py` — out-of-band diagnostic for the fail-closed grey-out.**
+  Reproduces the adapter's `_engine_path()` resolution and walks the M1–M5 table,
+  ending with a HEALTHY result or the exact shell command to fix the cause (reported
+  as an ops problem, never a scan finding). Run `python3 adapters/hermes/doctor.py`.
 - **R2b: web-tools-only allowlist in the Hermes adapter (disjoint from `security-guidance`).**
   `transform_tool_result` and `pre_tool_call` now act on **exactly** the allowlisted web
   ingress/sink tools — exact `web_search`/`web_extract`/`x_search`, the `web_*`,
