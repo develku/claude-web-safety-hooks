@@ -110,6 +110,24 @@ lazy_re!(
 );
 lazy_re!(re_at_host, r"[A-Za-z0-9._-]+@[A-Za-z0-9.-]+");
 
+lazy_re!(
+    re_fetch,
+    r"(?i)(^|[^a-zA-Z0-9_.])(curl|wget|aria2c|lynx|links2?|elinks|w3m)([^a-zA-Z0-9_./-]|$)"
+);
+
+/// The Layer 8 ROUTING predicate, ported from `web-safety-lib.sh`'s
+/// `is_fetch_command`: does this command's normal job fetch remote web content
+/// TO STDOUT? A `true` means the command's output should be content-scanned; a
+/// `false` keeps routine `cat`/`ls`/`grep` output away from a halting scanner.
+///
+/// Deliberately NARROW, exactly as the shell's v1: direct fetch-to-stdout tools
+/// plus HTTPie by argument shape. It excludes git clone / package installers
+/// (payload lands on disk) and the outbound-only members of [`is_egress_command`]
+/// (scp/ssh/dns/git-push — FP-heavy stdout, and egress's turf).
+pub fn is_fetch_command(cmd: &str) -> bool {
+    re_fetch().is_match(cmd) || re_httpie().is_match(cmd)
+}
+
 /// Does this command put bytes on the network?
 pub fn is_egress_command(cmd: &str) -> bool {
     if re_egress().is_match(cmd)

@@ -405,6 +405,8 @@ mod tests {
             runtime: "claude".into(),
             tool_name: "WebFetch".into(),
             url: Some("https://example.test/a".into()),
+            egress_url: None,
+            query: None,
             session_id: Some("s1".into()),
             task_id: None,
             agent_id: None,

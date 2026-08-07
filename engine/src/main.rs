@@ -1,9 +1,9 @@
 //! `web-safety-engine` — the shared scanner CLI.
 //!
 //! Reads one host envelope on stdin, writes that host's response schema on
-//! stdout. Not wired into any hook yet: Bash remains the production runtime and
-//! the rollback path for this stage. The binary exists so the differential
-//! runner can compare the two on identical input.
+//! stdout. This binary is what `hooks/hooks.json` invokes — the production
+//! scanner authority. The Bash scripts stay in-tree as the frozen differential
+//! oracle and the operator's rollback path.
 //!
 //! ```text
 //! web-safety-engine scan --host claude|codex|hermes
@@ -24,17 +24,20 @@ use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
 use web_safety_engine::contract::{
-    ContractError, Decision, ScanRequest, ScanResponse, Severity, SCHEMA_VERSION,
+    ContractError, Decision, Disposition, Finding, ScanRequest, ScanResponse, Severity,
+    SCHEMA_VERSION,
 };
 use web_safety_engine::engine::{Config, Engine, DEFAULT_MAX_SCAN_BYTES};
 use web_safety_engine::hosts::{
-    encode_response, encode_response_at, original_output, to_request_at, Event, Host,
-    DEFAULT_MAX_ENVELOPE_BYTES, MAX_ENVELOPE_BYTES_CEILING,
+    encode_pre_tool_response, encode_response, encode_response_at, original_output, to_request_at,
+    Event, Host, DEFAULT_MAX_ENVELOPE_BYTES, MAX_ENVELOPE_BYTES_CEILING, PRECALL_EGRESS_BASH_RULE,
+    PRECALL_EGRESS_FETCH_RULE, PRECALL_URLSCREEN_RULE,
 };
 use web_safety_engine::normalize::VIEW_NAMES;
+use web_safety_engine::oplog::{self, Oplog};
 use web_safety_engine::policy::Scanner;
 use web_safety_engine::state::{
-    StateConfig, StateContext, StateError, StateEvent, StateLayer, StateMode, StateReport,
+    Outcome, StateConfig, StateContext, StateError, StateEvent, StateLayer, StateMode, StateReport,
     StateStore, STATE_CONTEXT_VERSION, STATE_SCHEMA_VERSION, STATE_SCOPE_KEYS,
 };
 use web_safety_engine::{egress, urlscreen};
@@ -58,9 +61,18 @@ OPTIONS:
                              (default: post-tool). A pre-tool envelope carries
                              the intent (tool name + args) and no result, and
                              its response permits or refuses the call rather
-                             than replacing anything. Layers 1 and 6 are not
-                             ported to Rust yet, so pre-tool currently REFUSES
-                             every call — it cannot approve.
+                             than replacing anything (Layers 1 and 6).
+  --config-dir <PATH>        operator config: url-allowlist.txt,
+                             url-blocklist.txt, and the default audit-log
+                             location. Absent means no lists and no log; the
+                             WEB_SAFETY_CONFIG_DIR env var is honoured as a
+                             fallback, matching the shell hooks.
+  --default-allowlist <PATH> the plugin-shipped egress allowlist, layered under
+                             the operator's for the Layer 6 exemption only.
+                             WEB_SAFETY_DEFAULT_ALLOWLIST_DISABLE=1 ignores it.
+  --audit-log <PATH>         operator audit log (default:
+                             <config-dir>/web-safety.log when --config-dir is
+                             given, else disabled)
   --emit <host|report>       response encoding (default: host)
   --max-scan-bytes <N>       scan cap in bytes (default: 65536)
   --no-cap                   scan the whole input
@@ -143,47 +155,133 @@ fn main() -> ExitCode {
 /// is consulted only for calls Layer 1 was willing to let through.
 fn precall_decision(
     config_dir: &Option<PathBuf>,
+    default_allowlist: &Option<PathBuf>,
     state: &StateArgs,
     host: Host,
     request: &ScanRequest,
+    log: &Oplog,
 ) -> ScanResponse {
     let (allowlist, blocklist) = load_lists(config_dir);
+    let session = request.session_id.as_deref().unwrap_or("");
 
     // --- Layer 1 ---
+    //
+    // The USER allowlist only: the production pre-screen never consults the
+    // plugin-shipped default list — that list exists to quiet the armed egress
+    // guard, not to widen what the screen's soft blocks permit.
+    //
+    // The screen's reason travels on the response as a finding so the host
+    // encoder can say what the production hook says (`Pre-screening blocked:
+    // <reason>`). The vocabulary is the screen's own fixed strings — nothing
+    // derived from page content.
     if let Some(url) = request.url.as_deref() {
-        if let urlscreen::Screen::Block(_) = urlscreen::screen(url, &allowlist, &blocklist) {
-            // The reason is deliberately NOT carried into the response. It names
-            // the offending URL's shape and lands in prose the model reads; the
-            // hooks log it instead, and the model is told only that the call was
-            // refused.
-            return precall_refusal();
+        if let urlscreen::Screen::Block(reason) = urlscreen::screen(url, &allowlist, &blocklist) {
+            log.pre_block(url, &reason);
+            return precall_refusal(reason);
         }
     }
 
     // --- Layer 6 ---
     //
+    // Kill switch first, the same env lever the Bash guard honours. It disables
+    // the GUARD only; the Layer 1 screen above is a separate hook in production
+    // and stays live here too.
+    if std::env::var("WEB_SAFETY_EGRESS_GUARD_DISABLE").as_deref() == Ok("1") {
+        return precall_allow();
+    }
+
     // `armed` is READ from the engine's own state, never re-derived here. It is
     // false whenever state is off or unreadable, which matches the Bash guard:
     // this is a secondary layer over an already-armed session, and it defers in
     // every case it cannot positively establish.
     let armed = precall_armed(state, host, request);
-    let call = egress::Call {
-        tool_name: &request.tool_name,
-        command: request.command.as_deref().unwrap_or(""),
-        url: request.url.as_deref().unwrap_or(""),
-        armed,
-    };
-    if egress::decide(&call, &allowlist).is_guard() {
-        return precall_refusal();
+
+    // The armed-window WebSearch downgrade is logged, never prompted — the
+    // query goes to the configured provider, not an attacker-chosen host.
+    // `decide` below returns `Defer` for it; the audit row is the Bash guard's
+    // observable side of that decision, kept here.
+    if armed && request.tool_name == "WebSearch" && request.command.is_none() {
+        log.egress_search_downgrade(session, request.query.as_deref().unwrap_or(""));
     }
 
-    precall_allow()
+    // The guard's exemption list is the plugin-shipped default allowlist
+    // layered UNDER the operator's file — `host_in_any_list` in the shell.
+    // Disable the default layer with the same env var the hook documents.
+    let mut egress_lists = allowlist;
+    if std::env::var("WEB_SAFETY_DEFAULT_ALLOWLIST_DISABLE").as_deref() != Ok("1") {
+        if let Some(path) = default_allowlist {
+            if let Ok(s) = std::fs::read_to_string(path) {
+                egress_lists.extend(s.lines().map(str::to_string));
+            }
+        }
+    }
+
+    // The guard reads the WIDER url the host's egress hook reads
+    // (`egress_url`), falling back to the screen's — on most hosts they are
+    // the same field.
+    let guard_url = request
+        .egress_url
+        .as_deref()
+        .or(request.url.as_deref())
+        .unwrap_or("");
+    let command = request.command.as_deref().unwrap_or("");
+    let call = egress::Call {
+        tool_name: &request.tool_name,
+        command,
+        url: guard_url,
+        armed,
+    };
+    match egress::decide(&call, &egress_lists) {
+        egress::Egress::Defer => precall_allow(),
+        egress::Egress::GuardFetch => {
+            log.egress_ask_fetch(session, &request.tool_name, Some(guard_url));
+            precall_guard(PRECALL_EGRESS_FETCH_RULE)
+        }
+        egress::Egress::GuardBash => {
+            log.egress_ask_bash(session, command);
+            precall_guard(PRECALL_EGRESS_BASH_RULE)
+        }
+    }
 }
 
-/// Refuse the call. HIGH/Block so every host encoder treats it as containment.
-fn precall_refusal() -> ScanResponse {
+/// One pre-call finding: the audit-trail carrier for WHICH control refused and
+/// why. `matched` is engine vocabulary, never page content.
+fn precall_finding(rule_id: &str, severity: Severity, matched: String) -> Finding {
+    Finding {
+        rule_id: rule_id.to_string(),
+        severity,
+        matched,
+        view: "raw".into(),
+        disposition: Disposition::Kept,
+        reason: None,
+    }
+}
+
+/// Layer 1 refusal. HIGH/Block so every host encoder treats it as containment.
+fn precall_refusal(reason: String) -> ScanResponse {
     ScanResponse {
         decision: Decision::Block,
+        findings: vec![precall_finding(
+            PRECALL_URLSCREEN_RULE,
+            Severity::High,
+            reason,
+        )],
+        ..containment()
+    }
+}
+
+/// Layer 6 escalation. MEDIUM/Ask — operator confirmation, which each host
+/// encoder renders in its own enforcement shape (and escalates to a hard block
+/// where the host would discard an ask).
+fn precall_guard(rule_id: &str) -> ScanResponse {
+    ScanResponse {
+        severity: Severity::Medium,
+        decision: Decision::Ask,
+        findings: vec![precall_finding(
+            rule_id,
+            Severity::Medium,
+            "armed egress".into(),
+        )],
         ..containment()
     }
 }
@@ -340,6 +438,8 @@ fn scan(args: &[String]) -> Result<(), Failure> {
     let mut host: Option<Host> = None;
     let mut event = Event::PostTool;
     let mut args_config_dir: Option<PathBuf> = None;
+    let mut default_allowlist: Option<PathBuf> = None;
+    let mut audit_log: Option<PathBuf> = None;
     let mut emit_report = false;
     let mut config = Config::default();
     let mut max_envelope_bytes = DEFAULT_MAX_ENVELOPE_BYTES;
@@ -361,6 +461,20 @@ fn scan(args: &[String]) -> Result<(), Failure> {
                 // Where url-allowlist.txt / url-blocklist.txt live. Absent means
                 // no lists, which costs only the soft blocks.
                 args_config_dir = Some(PathBuf::from(value?));
+                i += 2;
+            }
+            "--default-allowlist" => {
+                // The plugin-shipped egress allowlist, layered UNDER the
+                // operator's file for the Layer 6 exemption only — the URL
+                // pre-screen never reads it.
+                default_allowlist = Some(PathBuf::from(value?));
+                i += 2;
+            }
+            "--audit-log" => {
+                // The operator audit log. Defaults to
+                // `<config-dir>/web-safety.log` when a config dir is given —
+                // the hooks' own location — and to no logging otherwise.
+                audit_log = Some(PathBuf::from(value?));
                 i += 2;
             }
             "--event" => {
@@ -449,6 +563,20 @@ fn scan(args: &[String]) -> Result<(), Failure> {
     };
     let fail = |why: String| contract(ContractError::MalformedEnvelope(why));
 
+    // The hooks' own config-dir resolution: the flag, else the env override the
+    // shell scripts document. There is deliberately NO `$HOME` default here —
+    // a bare `scan` invocation must stay deterministic (no lists, no log), and
+    // the production wiring passes the directory explicitly.
+    let args_config_dir =
+        args_config_dir.or_else(|| std::env::var_os("WEB_SAFETY_CONFIG_DIR").map(PathBuf::from));
+
+    // The audit log the Bash hooks share. Its rows are consumed by the Layer 7
+    // scripts and /web-safety:report, so the engine keeps writing them.
+    let log = match audit_log.or_else(|| args_config_dir.as_deref().map(oplog::default_log)) {
+        Some(p) => Oplog::at(p),
+        None => Oplog::disabled(),
+    };
+
     let raw = read_envelope(max_envelope_bytes).map_err(contract)?;
     if raw.trim().is_empty() {
         return Err(fail("empty stdin".into()));
@@ -465,18 +593,39 @@ fn scan(args: &[String]) -> Result<(), Failure> {
 
     let response = match event {
         Event::PostTool => {
-            let mut r = Scanner::new(config).scan(&request.content);
-            apply_state(&state, host, &request, &mut r);
-            // Planned AFTER state, so an escalation or a quarantine is the
-            // outcome the replacement is built for — not the stateless verdict
-            // it started from.
-            r.replacement = web_safety_engine::sanitize::plan(&request, &r);
-            r
+            if routed_out_by_layer8_gate(host, &request) {
+                // `web-safety-bash-scan.sh`'s exit-0 path: a Bash result whose
+                // command is not fetch-shaped is never scanned, never touches
+                // state, and the hook says nothing. The gate is what keeps
+                // routine `cat`/`ls`/`grep` output away from a halting scanner.
+                precall_allow()
+            } else {
+                let mut r = Scanner::new(config).scan(&request.content);
+                apply_state(&state, host, &request, &mut r);
+                // Planned AFTER state, so an escalation or a quarantine is the
+                // outcome the replacement is built for — not the stateless
+                // verdict it started from.
+                r.replacement = web_safety_engine::sanitize::plan(&request, &r);
+                // The audit rows the Bash scanner wrote, in its order: the
+                // detection line `/web-safety-report` counts by severity, then
+                // — BEFORE the halt is delivered — the `[PENDING-KILLED]` row
+                // the Layer 7 consumers join (`record_agent_kill`'s ordering).
+                write_detection_row(&log, &request, &r);
+                write_kill_row(&log, &request, &r);
+                r
+            }
         }
         // Layers 1 and 6, the two controls that run BEFORE a tool does. The
         // content scanner is deliberately not consulted: `request.content` is
         // empty on this event, so it would find nothing and permit everything.
-        Event::PreTool => precall_decision(&args_config_dir, &state, host, &request),
+        Event::PreTool => precall_decision(
+            &args_config_dir,
+            &default_allowlist,
+            &state,
+            host,
+            &request,
+            &log,
+        ),
     };
 
     if emit_report {
@@ -485,23 +634,102 @@ fn scan(args: &[String]) -> Result<(), Failure> {
         // array and make a naive top-level field read pick a finding's severity.
         write_json(&response).map_err(Failure::Io)?;
     } else {
-        emit(&encode_response_at(
-            host,
-            event,
-            &request.tool_name,
-            &response,
-            // A pre-call envelope carries no result, so there is nothing to
-            // build a shape-preserving replacement from — and nothing to
-            // replace. Passing the post-call lookup here would read a field
-            // this event does not have.
-            match event {
-                Event::PostTool => original_output(host, &env),
-                Event::PreTool => None,
-            },
-        ))
-        .map_err(Failure::Io)?;
+        let doc = match event {
+            Event::PostTool => encode_response_at(
+                host,
+                event,
+                &request.tool_name,
+                &response,
+                original_output(host, &env),
+            ),
+            // A pre-call envelope carries no result to replace; its encoder
+            // permits or refuses, and needs the permission mode because some
+            // hosts discard an "ask" in some modes.
+            Event::PreTool => encode_pre_tool_response(
+                host,
+                &request.tool_name,
+                &response,
+                request.permission_mode.as_deref(),
+            ),
+        };
+        emit(&doc).map_err(Failure::Io)?;
     }
     Ok(())
+}
+
+/// The Layer 8 routing gate, host-scoped to where it is production behavior:
+/// Claude's Bash PostToolUse hook (`web-safety-bash-scan.sh`) scans a result
+/// only when the command that produced it is fetch-shaped. Other hosts route in
+/// their own adapters (Hermes forwards every terminal envelope deliberately).
+fn routed_out_by_layer8_gate(host: Host, request: &ScanRequest) -> bool {
+    host == Host::Claude
+        && request.tool_name == "Bash"
+        && !request
+            .command
+            .as_deref()
+            .is_some_and(egress::is_fetch_command)
+}
+
+/// KEPT finding labels, HIGH first then MEDIUM — `labels_for`'s order, the
+/// text the shell put in its `patterns=` fields. Operator-facing only.
+fn kept_labels(response: &ScanResponse) -> String {
+    let mut labels: Vec<&str> = response
+        .findings
+        .iter()
+        .filter(|f| f.counts_toward_verdict() && f.severity == Severity::High)
+        .map(|f| f.matched.as_str())
+        .collect();
+    labels.extend(
+        response
+            .findings
+            .iter()
+            .filter(|f| f.counts_toward_verdict() && f.severity == Severity::Medium)
+            .map(|f| f.matched.as_str()),
+    );
+    labels.join(", ")
+}
+
+/// Append the `[<SEVERITY>]` detection row (`log_detection` in the shell) for
+/// any verdict the scanner had something to say about. A clean scan writes
+/// nothing, exactly as the shell wrote nothing.
+fn write_detection_row(log: &Oplog, request: &ScanRequest, response: &ScanResponse) {
+    if response.decision == Decision::Allow {
+        return;
+    }
+    log.detection(
+        response.severity.as_str(),
+        &request.tool_name,
+        request.url.as_deref(),
+        &kept_labels(response),
+    );
+}
+
+/// Append the `[PENDING-KILLED]` audit row when this scan just ledgered a
+/// subagent kill. The ROW is the carrier the Bash Layer 7 consumers
+/// (`web-safety-agent-result.sh`, `web-safety-stop-gate.sh`) join on; the
+/// ledger row in the state store is the engine's own durable record.
+fn write_kill_row(log: &Oplog, request: &ScanRequest, response: &ScanResponse) {
+    let Some(state) = &response.state else { return };
+    if !state.ledgered {
+        return;
+    }
+    // The same outcome→severity vocabulary `record_kill` was fed.
+    let severity = match state.outcome {
+        Outcome::High => "HIGH",
+        Outcome::Escalated => "ESCALATED",
+        Outcome::Medium => "MEDIUM",
+        _ => return,
+    };
+    log.pending_killed(
+        oplog::epoch_now(),
+        request.session_id.as_deref().unwrap_or(""),
+        request.agent_id.as_deref().unwrap_or(""),
+        severity,
+        &request.tool_name,
+        request.url.as_deref(),
+        // The consumers never copy `patterns` into model-facing text.
+        &kept_labels(response),
+    );
 }
 
 /// Settle the task/execution dimension from the host envelope and the optional
@@ -641,7 +869,6 @@ fn fold_state(response: &mut ScanResponse, report: StateReport) {
 
 /// The severity/decision pair a modelled outcome delivers.
 fn verdict_for(report: &web_safety_engine::state::StateReport) -> (Severity, Decision) {
-    use web_safety_engine::state::Outcome;
     match report.outcome {
         Outcome::High | Outcome::Escalated => (Severity::High, Decision::Block),
         // A quarantine is MEDIUM-tier containment: the result is replaced, but

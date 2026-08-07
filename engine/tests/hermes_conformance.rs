@@ -503,23 +503,21 @@ fn a_pre_call_envelope_is_still_rejected_on_the_post_call_event() {
     );
 }
 
-/// Claude and Codex have real pre-call contracts, but neither is extracted into
-/// a fixture. Guessing the field names is the mistake the Hermes certification
-/// caught; refusing is the honest state until someone does the extraction.
+/// Codex has a real pre-call contract, but it is not extracted into a fixture.
+/// Guessing the field names is the mistake the Hermes certification caught;
+/// refusing is the honest state until someone does the extraction. (Claude's
+/// pre-call contract is now certified — `claude_precall_conformance.rs`.)
 #[test]
 fn an_uncertified_hosts_pre_call_envelope_is_refused_not_guessed() {
-    for host in ["claude", "codex"] {
-        let out = run(
-            &["scan", "--host", host, "--event", "pre-tool"],
-            &json!({"tool_name": "WebFetch", "tool_input": {"url": "https://example.test"}})
-                .to_string(),
-        );
-        assert_eq!(
-            out.status.code(),
-            Some(2),
-            "{host}: an uncertified pre-call contract must fail closed"
-        );
-    }
+    let out = run(
+        &["scan", "--host", "codex", "--event", "pre-tool"],
+        &json!({"tool_name": "shell", "tool_input": {"url": "https://example.test"}}).to_string(),
+    );
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "codex: an uncertified pre-call contract must fail closed"
+    );
 }
 
 #[test]

@@ -112,6 +112,42 @@ unknown shape takes the replacement-free `continue:false` stop path. A subset
 match would mean cloning the hostile response and patching the leaves the check
 happened to look at, which is the containment leak this stage exists to close.
 
+## PreToolUse fixtures — DERIVED, not live-captured
+
+`pretooluse-webfetch.json`, `pretooluse-websearch.json` and
+`pretooluse-bash.json` are **derived from the production Bash authority, not a
+fresh live capture**. A live capture was attempted on 2026-08-07 (CLI 2.1.223)
+and blocked on `claude -p` reporting "OAuth session expired and could not be
+refreshed"; re-authentication is an operator action, and misrepresenting a
+derived fixture as captured is exactly what this README exists to prevent.
+
+What "derived from the production Bash authority" means concretely — every
+field name comes from a `jq` expression a production hook has been reading from
+live PreToolUse envelopes for months:
+
+| Field | Production reader |
+|---|---|
+| `.tool_name` | `web-safety-egress.sh` |
+| `.tool_input.url // .URL` | `web-safety-approve.sh` (Layer 1) |
+| `.tool_input.url // .URL // .uri // .href // .urls[0]` | `web-safety-egress.sh` (Layer 6 fetch channel) |
+| `.tool_input.command` | `web-safety-egress.sh` (Bash channel), `web-safety-bash-scan.sh` |
+| `.tool_input.query` | `web-safety-egress.sh` (WebSearch downgrade log) |
+| `.permission_mode` | `web-safety-egress.sh` (mode-aware enforcement) |
+| `.session_id`, `.prompt_id` | live-captured on this version's PostToolUse envelopes (above); common hook-input fields per the hooks reference |
+
+The surrounding envelope keys (`cwd`, `hook_event_name`, `transcript_path`,
+`tool_use_id`) mirror the live-captured PostToolUse envelopes and the published
+hook-input contract; the Rust mapping reads none of them. Values follow the
+same redaction conventions as the captured fixtures (synthetic UUIDs,
+`/fixture/...` paths, benign RFC-2606-class text).
+
+**Upgrade path:** after `claude --login`, re-run the isolated harness above
+with a PreToolUse capture hook and replace these three files with redacted
+live captures, then delete this section's "derived" caveat. The conformance
+suite (`tests/claude_precall_conformance.rs`) locks the field READS, so a live
+capture that agrees changes nothing and a live capture that disagrees fails the
+suite loudly — which is the point.
+
 ### Not captured on 2.1.220
 
 A **string-valued** `WebFetch` `tool_response`. Every observed WebFetch result

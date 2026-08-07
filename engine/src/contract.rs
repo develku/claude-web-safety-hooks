@@ -61,6 +61,24 @@ pub struct ScanRequest {
     pub tool_name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
+    /// The WIDER egress-destination candidate a PRE-call envelope may carry,
+    /// when the host's egress guard reads more URL spellings than its URL
+    /// pre-screen does. Claude's production guard reads
+    /// `.tool_input.url // .URL // .uri // .href // .urls[0]` while its
+    /// pre-screen reads only `url // URL`; collapsing the two onto one field
+    /// would either over-block (screening a URL the pre-screen never saw) or
+    /// over-ask (hiding an allowlisted destination from the guard). Layer 6
+    /// reads this and falls back to [`ScanRequest::url`]; Layer 1 never does.
+    ///
+    /// Additive and `Option`-typed, so it needs no [`SCHEMA_VERSION`] bump.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub egress_url: Option<String>,
+    /// A search tool's free-text query on a PRE-call envelope. Never screened —
+    /// a query that merely mentions "localhost" is not a URL — and never sent to
+    /// a model; it exists for the audit row the armed-window WebSearch
+    /// downgrade writes. Additive and `Option`-typed: no version bump.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub query: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
     /// The host's task/execution dimension — Claude's `prompt_id`, and whatever
@@ -202,6 +220,8 @@ mod tests {
             runtime: "claude".into(),
             tool_name: "WebFetch".into(),
             url: Some("https://example.test/a".into()),
+            egress_url: None,
+            query: None,
             session_id: None,
             task_id: None,
             agent_id: None,

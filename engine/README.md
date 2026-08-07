@@ -4,7 +4,10 @@ Shared scanner core for the web-safety hooks. Architecture and the Bash→Rust m
 live in [`docs/rust-core.md`](../docs/rust-core.md); this file is how to build and
 run it.
 
-**Bash is still production.** Nothing in this directory is wired into a hook.
+**This is production** (since v9.0.0): `hooks/hooks.json` invokes
+`target/release/web-safety-engine` on the Claude Code PreToolUse and PostToolUse
+hook sites. The Bash scripts in `scripts/` are the frozen differential oracle and
+the rollback path.
 
 ## Build and test
 

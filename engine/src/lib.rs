@@ -14,8 +14,9 @@
 //! | [`policy`] | the context gate, Layer 5, and the emit-stage reclassification |
 //! | [`sanitize`] | `sanitize_content()` / `emit_search_quarantine()` — what replaces a contained result |
 //!
-//! Bash stays the authoritative production runtime for this stage; this crate is
-//! built to be differentially compared against it, not to replace it yet.
+//! This crate is the production scanner authority — `hooks/hooks.json` invokes
+//! its binary on every wired hook site. The Bash pipeline stays in-tree as the
+//! frozen differential oracle and the operator's rollback path.
 
 pub mod contract;
 pub mod corpus;
@@ -23,6 +24,7 @@ pub mod egress;
 pub mod engine;
 pub mod hosts;
 pub mod normalize;
+pub mod oplog;
 pub mod policy;
 pub mod sanitize;
 pub mod state;
