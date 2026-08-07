@@ -26,12 +26,16 @@ fn run_in(cwd: Option<&Path>, args: &[&str], stdin: &str) -> Output {
         cmd.current_dir(dir);
     }
     let mut child = cmd.spawn().expect("cli spawns");
-    child
+    // Deliberately unchecked: a usage-error invocation exits before reading
+    // stdin at all, so this write can land on a closed pipe — the child being
+    // right, not a harness failure. (The Linux CI leg loses that race reliably
+    // and turned the old `.expect` into a BrokenPipe panic.) A scan test whose
+    // envelope truly went missing still fails loudly on its verdict assertion.
+    let _ = child
         .stdin
         .as_mut()
         .expect("stdin")
-        .write_all(stdin.as_bytes())
-        .expect("write stdin");
+        .write_all(stdin.as_bytes());
     child.wait_with_output().expect("cli runs")
 }
 

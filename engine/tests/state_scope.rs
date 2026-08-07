@@ -308,12 +308,15 @@ fn run(args: &[&str], stdin: &str) -> Output {
         .stderr(Stdio::piped())
         .spawn()
         .expect("cli spawns");
-    child
+    // Deliberately unchecked: a child that rejects its invocation (or its
+    // input) can exit before draining stdin, closing the pipe — the child
+    // being right, not a harness failure. A test whose input truly went
+    // missing still fails loudly on its own assertions.
+    let _ = child
         .stdin
         .as_mut()
         .expect("stdin")
-        .write_all(stdin.as_bytes())
-        .expect("write stdin");
+        .write_all(stdin.as_bytes());
     child.wait_with_output().expect("cli runs")
 }
 

@@ -669,12 +669,15 @@ fn invalid_utf8_in_the_envelope_fails_closed_without_panicking() {
         .stderr(Stdio::piped())
         .spawn()
         .expect("cli spawns");
-    child
+    // Deliberately unchecked: a child that rejects its invocation (or its
+    // input) can exit before draining stdin, closing the pipe — the child
+    // being right, not a harness failure. A test whose input truly went
+    // missing still fails loudly on its own assertions.
+    let _ = child
         .stdin
         .as_mut()
         .expect("stdin")
-        .write_all(b"{\"tool_name\":\"t\",\"tool_response\":\"\xff\xfe\"}")
-        .expect("write stdin");
+        .write_all(b"{\"tool_name\":\"t\",\"tool_response\":\"\xff\xfe\"}");
     let out = child.wait_with_output().expect("cli runs");
     assert_eq!(out.status.code(), Some(2));
 }
