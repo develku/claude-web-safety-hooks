@@ -86,6 +86,26 @@ impl Oplog {
         ));
     }
 
+    /// `[STATE-ERROR]` — the correlation store could not be used.
+    ///
+    /// No Bash counterpart, and that is the point: Bash's state was `/tmp`
+    /// files whose failure mode was one unwritable file, while this is a store
+    /// whose root can be REFUSED wholesale (a symlinked or world-writable
+    /// path). In `report` mode that refusal is swallowed — the scan is still
+    /// delivered — so without this row the operator sees a perfectly healthy
+    /// hook while Layer 6 never arms and Layer 7 never gets a ledger row.
+    ///
+    /// `/web-safety-report` tabulates any `[A-Z-]+` tag, so this surfaces there
+    /// with no change to that script.
+    pub fn state_error(&self, session: &str, mode: &str, why: &str) {
+        self.write(&format!(
+            "[STATE-ERROR] session={} mode={} detail=\"{}\"",
+            session_key(session),
+            clean(mode, 16),
+            clean(why, 300)
+        ));
+    }
+
     /// `[<SEVERITY>]` — a detection verdict, `web-safety-scanner.sh`'s
     /// `log_detection`: `tool=<name>[ url=<url>] patterns=<labels>`. This is
     /// the row `/web-safety-report` counts by severity.

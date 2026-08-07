@@ -1,5 +1,5 @@
 {
-  "description": "Web safety hooks — URL pre-screening + prompt-injection scanner for web-fetching tools. Scanner authority: the Rust engine (engine/, built in-tree via `cargo build --release`); the Bash scripts remain as the frozen differential oracle, and as the Layer 7 bridge (agent-result + stop-gate) reading the engine's audit rows.",
+  "description": "Web safety hooks \u2014 URL pre-screening + prompt-injection scanner for web-fetching tools. Scanner authority: the Rust engine (engine/, built in-tree via `cargo build --release`); the Bash scripts remain as the frozen differential oracle, and as the Layer 7 bridge (agent-result + stop-gate) reading the engine's audit rows.",
   "hooks": {
     "PreToolUse": [
       {
@@ -27,7 +27,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "E=\"${CLAUDE_PLUGIN_ROOT}/engine/target/release/web-safety-engine\"; if [ -x \"$E\" ]; then exec \"$E\" scan --host claude --event post-tool --config-dir \"${WEB_SAFETY_CONFIG_DIR:-$HOME/.claude/hooks}\" --state-mode report --state-dir \"${WEB_SAFETY_CONFIG_DIR:-$HOME/.claude/hooks}/engine-state\" --state-namespace default; else printf '%s' '{\"continue\":false,\"stopReason\":\"web-safety: engine binary missing — this tool result was withheld fail-closed. Build the engine: cargo build --release in the plugin engine/ directory.\"}'; fi",
+            "command": "E=\"${CLAUDE_PLUGIN_ROOT}/engine/target/release/web-safety-engine\"; if [ -x \"$E\" ]; then exec \"$E\" scan --host claude --event post-tool --max-envelope-bytes 8388608 --config-dir \"${WEB_SAFETY_CONFIG_DIR:-$HOME/.claude/hooks}\" --state-mode report --state-dir \"${WEB_SAFETY_CONFIG_DIR:-$HOME/.claude/hooks}/engine-state\" --state-namespace default; else printf '%s' '{\"continue\":false,\"stopReason\":\"web-safety: engine binary missing \u2014 this tool result was withheld fail-closed. Build the engine: cargo build --release in the plugin engine/ directory.\"}'; fi",
             "timeout": 10000
           }
         ]
@@ -37,7 +37,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "E=\"${CLAUDE_PLUGIN_ROOT}/engine/target/release/web-safety-engine\"; [ -x \"$E\" ] || exit 0; exec \"$E\" scan --host claude --event post-tool --config-dir \"${WEB_SAFETY_CONFIG_DIR:-$HOME/.claude/hooks}\" --state-mode report --state-dir \"${WEB_SAFETY_CONFIG_DIR:-$HOME/.claude/hooks}/engine-state\" --state-namespace default",
+            "command": "E=\"${CLAUDE_PLUGIN_ROOT}/engine/target/release/web-safety-engine\"; [ -x \"$E\" ] || exit 0; exec \"$E\" scan --host claude --event post-tool --max-envelope-bytes 8388608 --config-dir \"${WEB_SAFETY_CONFIG_DIR:-$HOME/.claude/hooks}\" --state-mode report --state-dir \"${WEB_SAFETY_CONFIG_DIR:-$HOME/.claude/hooks}/engine-state\" --state-namespace default",
             "timeout": 10000
           }
         ]

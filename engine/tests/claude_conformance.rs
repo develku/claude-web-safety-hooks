@@ -284,25 +284,53 @@ fn quarantine_output(env: &Value) -> Value {
     )
 }
 
-// --- 6. task identity from prompt_id -----------------------------------------
+// --- 6. prompt_id is a TURN id and must never become the correlation scope ---
+//
+// The regression this section exists for: `prompt_id` was mapped onto
+// `ScanRequest.task_id`, which is a state SCOPE key. The host's own hook-input
+// schema (read out of the shipped 2.1.224 CLI) defines it as "UUID correlating
+// a user prompt with all subsequent events until the next prompt" — it changes
+// every time the user speaks. Scoping on it partitioned the armed egress
+// window, the 3-strike escalation, split-payload reassembly and the kill ledger
+// per TURN, so Layer 6 silently disarmed at the next user message. The Bash
+// authority keys all four on the session alone.
 
 #[test]
-fn the_task_dimension_comes_from_prompt_id() {
+fn prompt_id_is_a_turn_id_and_never_becomes_the_correlation_scope() {
     let env = fixture("webfetch-main.json");
+    assert!(
+        env["prompt_id"].is_string(),
+        "the fixture must carry a prompt_id for this test to mean anything"
+    );
     let r = to_request(Host::Claude, &env, DEFAULT_MAX_ENVELOPE_BYTES).unwrap();
     assert_eq!(
-        r.task_id.as_deref(),
-        env["prompt_id"].as_str(),
-        "prompt_id is the Claude task/execution dimension"
+        r.task_id, None,
+        "a per-turn id must not partition session-lifetime correlation state"
     );
+    // The session — which IS the correlation lifetime — still maps exactly.
     assert_eq!(r.session_id.as_deref(), env["session_id"].as_str());
 }
 
 #[test]
-fn an_absent_prompt_id_is_its_own_scope_and_is_never_synthesized() {
+fn a_host_that_omits_prompt_id_maps_the_same_way() {
+    // Nothing to drop, same outcome: absence and a turn id are both "no task".
     let env = fixture("webfetch-no-prompt-id.json");
     let r = to_request(Host::Claude, &env, DEFAULT_MAX_ENVELOPE_BYTES).unwrap();
     assert_eq!(r.task_id, None);
+}
+
+#[test]
+fn two_turns_of_one_session_share_one_correlation_scope() {
+    // The property in its own right: the ONLY difference between these two
+    // envelopes is the turn, and the scope key must not see it.
+    let mut a = fixture("webfetch-main.json");
+    let mut b = fixture("webfetch-main.json");
+    a["prompt_id"] = serde_json::json!("00000000-0000-4000-8000-00000000000a");
+    b["prompt_id"] = serde_json::json!("00000000-0000-4000-8000-00000000000b");
+    let ra = to_request(Host::Claude, &a, DEFAULT_MAX_ENVELOPE_BYTES).unwrap();
+    let rb = to_request(Host::Claude, &b, DEFAULT_MAX_ENVELOPE_BYTES).unwrap();
+    assert_eq!(ra.task_id, rb.task_id);
+    assert_eq!(ra.session_id, rb.session_id);
 }
 
 #[test]
@@ -311,7 +339,9 @@ fn a_subagent_envelope_preserves_session_and_agent_identity_exactly() {
     let r = to_request(Host::Claude, &env, DEFAULT_MAX_ENVELOPE_BYTES).unwrap();
     assert_eq!(r.agent_id.as_deref(), env["agent_id"].as_str());
     assert_eq!(r.session_id.as_deref(), env["session_id"].as_str());
-    assert_eq!(r.task_id.as_deref(), env["prompt_id"].as_str());
+    // Session and AGENT are the two dimensions a subagent is correlated by;
+    // the turn is not one of them.
+    assert_eq!(r.task_id, None);
 }
 
 // --- 7. an invalid replacement shape is rejected ------------------------------

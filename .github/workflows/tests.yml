@@ -101,3 +101,11 @@ jobs:
 
       - name: Clippy (deny warnings)
         run: cargo clippy --all-targets --locked -- -D warnings
+
+      - name: End-to-end wiring probe (hooks.json command lines vs the Bash oracle)
+        # Runs here rather than in the scanner job because it needs the release
+        # binary this job just built. It is the only suite that tests the
+        # WIRING — a green engine and a green oracle can still be wired
+        # together wrongly, which is exactly how the 9.0.1 regressions shipped.
+        working-directory: .
+        run: ./tests/run-wiring-probe.sh

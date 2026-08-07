@@ -1,6 +1,6 @@
 [package]
 name = "web-safety-engine"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2021"
 rust-version = "1.85"
 description = "Shared low-latency scanner core for the web-safety hooks (Claude Code, Codex, Hermes)"

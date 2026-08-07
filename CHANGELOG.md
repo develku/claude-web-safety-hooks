@@ -2,6 +2,97 @@
 
 All notable changes to this project. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [9.0.1] — 2026-08-08 — post-flip audit: the controls v9.0.0 quietly took away
+
+**A multi-agent audit of the Claude path** (six independent dimensions; every
+finding re-run by a separate agent paid to refute it) found four regressions the
+flip had introduced and one long-standing blind spot. Everything below is fixed,
+mutation-tested (reverting the fix makes its guard fail), and covered by a new
+end-to-end wiring suite.
+
+### Fixed
+
+- **A user turn was partitioning session-lifetime state (the serious one).**
+  `prompt_id` was mapped onto `ScanRequest.task_id`, which is a state SCOPE key.
+  The host's own hook-input schema — read out of the shipped CLI — defines it as
+  *"UUID correlating a user prompt with all subsequent events until the next
+  prompt"*: it changes every time the user speaks. Four session-lifetime
+  controls were therefore per-TURN — the Layer 6 armed window disarmed at the
+  next user message, the Layer 4 3-strike escalation reset, E8 split-payload
+  reassembly never rejoined, and kill-ledger rows were filed under a scope the
+  reader never looks in. The exposure is the most realistic inject→exfil shape
+  there is: injected page in turn N, `curl` in turn N+1, no prompt, no audit row.
+  Turn ids (Claude `prompt_id`, Codex `turn_id`) no longer feed the correlation
+  scope. Hermes' `task_id` — a genuinely concurrent execution — still does, so
+  this is not an over-correction. New `engine/tests/claude_turn_scope.rs` drives
+  the real binary with the real wired flags and changes ONLY `prompt_id`
+  between calls.
+- **`/web-safety-trust` and `url-content-trust.txt` were a complete no-op.** The
+  engine never read the file, so the shipped command did nothing and every
+  security article quoting attack strings was contained again — the exact
+  problem v7.11.0 existed to solve. The engine now resolves trust with the same
+  `normalize_host` + suffix match the Bash scanner used, and fails safe on a
+  missing URL or an authority that will not resolve (a `user@host` trick cannot
+  buy trust). `--content-trusted` remains an explicit override for an adapter
+  that resolves trust itself.
+- **Three operator env switches were dead on the wired path.**
+  `WEB_SAFETY_SEARCH_QUARANTINE_DISABLE`, `WEB_SAFETY_MAX_SCAN_BYTES` and
+  `WEB_SAFETY_NOTIFY_DEDUP_WINDOW` are honoured again (an explicit CLI flag
+  still wins over the environment). The four with no engine equivalent —
+  `HIGH_SEVERITY_ACTION`, `VERIFY_CONTEXT_ENABLED`, `CONTEXT_GATE_ENABLED`,
+  `WEB_SAFETY_SUGGEST_THRESHOLD` — are now documented as **Bash-oracle-only** in
+  `docs/tuning.md` rather than left looking alive. A switch the operator
+  believes they have and does not is worse than one never offered.
+- **An oversized tool result hard-stopped the turn as "HIGH (0 finding(s))".**
+  That sentence asserts a prompt injection was found and simultaneously reports
+  that nothing was found, for a result that was never scanned at all — the 1 MiB
+  envelope limit had turned ordinary large docs pages into unscanned hard stops,
+  deleting the v8.9 oversized-page behaviour. The wired limit rises to 8 MiB
+  (the resource bound is still real, and `--no-cap` still does not lift it), and
+  contract-error containment now has its own text that says plainly that nothing
+  was scanned and names the flag that raises the limit.
+- **A state store that cannot be used no longer fails silently.** The store
+  refuses a root whose path contains a symlink, is world-writable, or cannot be
+  created — a redirectable path is not a controlled one. In `report` mode that
+  refusal was swallowed whole: the scan was delivered, Layer 6 never armed,
+  Layer 7 never got a ledger row, and stdout, stderr and the audit log all
+  looked healthy. A `~/.claude/hooks` symlinked into a dotfiles repo is enough
+  to trigger it. Every occurrence — on the post-call transition AND on the
+  pre-call arm read — now writes a `[STATE-ERROR]` row naming the cause, which
+  `/web-safety-report` tabulates with no change to that script. The refusal
+  itself is unchanged: it is a deliberate security property, not a bug.
+
+### Added
+
+- **`tests/run-wiring-probe.sh`** — the seam no unit suite could see. It
+  extracts the EXACT command lines out of `hooks/hooks.json`, runs them through
+  `bash -c` the way the harness does, and compares the verdict against the
+  frozen Bash oracle on byte-identical stdin: 27 checks covering block/approve
+  parity, the armed ask→hard-block escalation, the cross-turn arm window, the
+  content-trust downgrade, the routing gate, the oversized-page path (with a
+  control proving the old limit still reproduces the old behaviour) and every
+  audit row. Skips cleanly when the engine is not built.
+- `engine/tests/operator_controls.rs` and `engine/tests/claude_turn_scope.rs`
+  (15 new cases). Engine suite 546 → 561.
+
+### Notes
+
+Two of the probe's own checks were found **unfailable** while writing them, and
+both are worth recording because the class recurs: `jq '.continue // "none"'`
+reports `"none"` for a genuine `continue:false` (jq's alternative operator
+treats `false` as empty), so every "did not halt" assertion built on it could
+never fail; and a 1.3 MB envelope built with `jq --arg` silently blew `ARG_MAX`,
+so that check tested a stale variable. A test that cannot fail is worse than no
+test — it is a false green. Both are fixed, and the fixes are why the oversized
+page case now carries an explicit control.
+
+### Rollback
+
+Unchanged from 9.0.0: rewire `hooks/hooks.json` back to the Bash scripts. The
+9.0.1 fixes are all engine-side plus one `hooks.json` flag, so rolling back to
+the scripts also rolls back past these regressions — the Bash pipeline never had
+them.
+
 ## [9.0.0] — 2026-08-07 — the Rust engine becomes the production scanner authority
 
 **The flip.** `hooks/hooks.json` now invokes the Rust engine

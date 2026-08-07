@@ -4,21 +4,40 @@ How to customise the scanner without forking it.
 
 ## Environment variables
 
-| Variable | Default | Effect |
-|---|---|---|
-| `HIGH_SEVERITY_ACTION` | `stop` | `stop` halts Claude; `warn` issues a strong warning and lets Claude continue |
-| `VERIFY_CONTEXT_ENABLED` | `true` | `false` disables Layer 5 (revert to v5.1 behaviour — every `MED_GENERIC_DELIMITERS` match pages the user) |
-| `WEB_SAFETY_CONFIG_DIR` | `~/.claude/hooks` | Where the audit log, blocklist, and allowlist live. Persists across plugin updates |
-| `CLAUDE_PLUGIN_ROOT` | (set by Claude Code) | Plugin install location — scripts auto-resolve sibling paths from here. Don't set manually |
-| `CLAUDE_SESSION_ID` | `$PPID` fallback | Scopes `/tmp/web-safety-session-*` files per Claude session. Set automatically by recent Claude Code versions. Override only for testing (each unique value = isolated state). |
-| `WEB_SAFETY_DEFAULT_ALLOWLIST_DISABLE` | `0` | `1` disables the plugin-shipped Layer-6 default allowlist (`scripts/web-safety-default-allowlist.txt`), falling back to user-file-only exemption. See "Layer 6" below. |
-| `WEB_SAFETY_SUGGEST_THRESHOLD` | `3` | Number of armed-window asks to the **same** host before the guard appends a one-shot `/web-safety:allow <host>` hint to the confirmation. Never auto-adds. |
-| `WEB_SAFETY_SEARCH_QUARANTINE_DISABLE` | `0` | `1` restores the pre-8.12.0 behaviour where a lone MEDIUM on a subagent's `WebSearch` result **kills** that subagent instead of quarantining the result. See "WebSearch quarantine" below. |
+Since **v9.0.0** the Claude hook sites run the Rust engine, so a switch only
+works if the ENGINE reads it. The "Wired path" column is the honest answer for
+Claude Code today; "Bash oracle only" means the switch still works if you rewire
+`hooks/hooks.json` back to `scripts/`, and is otherwise inert. Nothing here is
+faked — a switch the engine has no equivalent for is listed as dead rather than
+quietly ignored.
 
-Example — disable Layer 5 for a single session:
+| Variable | Default | Wired path | Effect |
+|---|---|---|---|
+| `WEB_SAFETY_CONFIG_DIR` | `~/.claude/hooks` | **live** | Where the audit log, blocklist, allowlist and content-trust list live, and (under `engine-state/`) the correlation store. Persists across plugin updates |
+| `WEB_SAFETY_DEFAULT_ALLOWLIST_DISABLE` | `0` | **live** | `1` disables the plugin-shipped Layer-6 default allowlist (`scripts/web-safety-default-allowlist.txt`), falling back to user-file-only exemption. See "Layer 6" below. |
+| `WEB_SAFETY_EGRESS_GUARD_DISABLE` | `0` | **live** | `1` disables the Layer 6 outbound guard entirely. The Layer 1 URL pre-screen is a separate control and stays on. |
+| `WEB_SAFETY_SEARCH_QUARANTINE_DISABLE` | `0` | **live** | `1` restores the pre-8.12.0 behaviour where a lone MEDIUM on a subagent's `WebSearch` result **kills** that subagent instead of quarantining the result. See "WebSearch quarantine" below. |
+| `WEB_SAFETY_MAX_SCAN_BYTES` | `65536` | **live** | Scan cap. Content past it is scanned as a head 3/4 + tail 1/4 slice and the gap is reported as a coverage note. An explicit `--max-scan-bytes` flag wins over this. |
+| `WEB_SAFETY_NOTIFY_DEDUP_WINDOW` | `300` | **live** | Seconds a `{severity + content-hash}` notification key stays deduplicated. |
+| `CLAUDE_PLUGIN_ROOT` | (set by Claude Code) | **live** | Plugin install location — the wiring resolves the engine binary and the shipped allowlist from here. Don't set manually |
+| `HIGH_SEVERITY_ACTION` | `stop` | Bash oracle only | `stop` halts Claude; `warn` issues a strong warning and lets Claude continue. The engine has no equivalent knob — its HIGH tier always contains. |
+| `VERIFY_CONTEXT_ENABLED` | `true` | Bash oracle only | `false` disables Layer 5. The engine's structural verification is not switchable. |
+| `CONTEXT_GATE_ENABLED` | `true` | Bash oracle only | `false` disables the v8.4 directive context gate. The engine's gate is not switchable. |
+| `WEB_SAFETY_SUGGEST_THRESHOLD` | `3` | Bash oracle only | The one-shot `/web-safety:allow <host>` hint after N armed-window asks. Not ported to the engine (it is a convenience, not part of the enforcement decision). |
+| `CLAUDE_SESSION_ID` | `$PPID` fallback | Bash oracle only | Scoped the old `/tmp/web-safety-session-*` files. The engine scopes on the envelope's own `session_id` instead, so this no longer isolates state. |
+
+**State-root requirement (v9.0.0+).** The engine's correlation store refuses a
+state root whose path contains a symlink, is world-writable, or cannot be
+created — a redirectable path is not a controlled one. `WEB_SAFETY_CONFIG_DIR`
+therefore has to be a real directory: if `~/.claude/hooks` is a symlink into a
+dotfiles repo, Layer 6 arming and the Layer 7 kill ledger will not run. That is
+no longer silent — every occurrence writes a `[STATE-ERROR]` row to
+`web-safety.log` naming the cause, and `/web-safety-report` tabulates it.
+
+Example — disable Layer 6 for a single session:
 
 ```bash
-export VERIFY_CONTEXT_ENABLED=false
+export WEB_SAFETY_EGRESS_GUARD_DISABLE=1
 claude
 ```
 

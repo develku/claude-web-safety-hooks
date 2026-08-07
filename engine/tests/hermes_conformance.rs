@@ -520,6 +520,34 @@ fn an_uncertified_hosts_pre_call_envelope_is_refused_not_guessed() {
     );
 }
 
+/// Hermes reports a REAL task — a long-lived execution, not a turn — so it is
+/// the host where an adapter-supplied `--state-task` can contradict the host's
+/// own. That contradiction is a refusal rather than a precedence rule: picking
+/// either value would file the call under a scope its runtime does not
+/// recognise. (Claude and Codex report turns, which are deliberately not the
+/// task scope, so nothing there can contradict.)
+#[test]
+fn a_state_task_that_contradicts_the_hosts_own_is_refused() {
+    let out = run(
+        &[
+            "scan",
+            "--host",
+            "hermes",
+            "--state-task",
+            "some-other-task",
+        ],
+        &result_env(CLEAN),
+    );
+    assert_eq!(out.status.code(), Some(2), "a contradictory task id");
+
+    // Agreeing values are fine.
+    let out = run(
+        &["scan", "--host", "hermes", "--state-task", "t1"],
+        &result_env(CLEAN),
+    );
+    assert_eq!(out.status.code(), Some(0));
+}
+
 #[test]
 fn an_unknown_event_is_a_usage_error_not_a_scan_outcome() {
     let out = run(

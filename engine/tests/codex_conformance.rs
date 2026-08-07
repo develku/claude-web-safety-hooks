@@ -499,29 +499,43 @@ fn report_mode_without_an_agent_id_still_delivers_the_scan() {
     );
 }
 
+/// `turn_id` is REQUIRED by the host's schema and is NOT the correlation scope.
+///
+/// It names a turn, and correlation state here is session-lifetime: the armed
+/// egress window, the 3-strike escalation, split-payload reassembly and the
+/// kill ledger all have to outlive one turn. Scoping on it partitioned every
+/// one of them per turn — the regression audited out of the Claude path after
+/// v9.0.0, which this host shares by construction.
 #[test]
-fn the_turn_id_is_the_task_scope_and_is_never_synthesized() {
+fn the_turn_id_is_required_but_is_never_the_task_scope() {
     let out = run(
         &["scan", "--host", "codex", "--emit", "report"],
         &with_body("bash-exec-main.json", CLEAN),
     );
     assert!(out.status.success());
-    // `--state-task` disagreeing with the host's own turn id is a refusal, not
-    // a precedence rule: picking either would file the call under a scope its
-    // runtime does not recognise.
+
+    // Presence is still enforced — dropping it is still not a 0.144.1 envelope.
+    let mut env = fixture("bash-exec-main.json");
+    env.as_object_mut().expect("object").remove("turn_id");
+    let out = run(&["scan", "--host", "codex"], &env.to_string());
+    assert_eq!(out.status.code(), Some(2), "turn_id is still required");
+
+    // With no host-reported task, an adapter-supplied one is simply accepted:
+    // there is nothing for it to contradict. (The contradiction refusal itself
+    // is exercised on Hermes, the one host that reports a REAL task.)
     let out = run(
         &[
             "scan",
             "--host",
             "codex",
             "--state-task",
-            "some-other-task",
+            "adapter-task",
             "--emit",
             "report",
         ],
         &with_body("bash-exec-main.json", CLEAN),
     );
-    assert_eq!(out.status.code(), Some(2), "a contradictory task id");
+    assert_eq!(out.status.code(), Some(0));
 }
 
 #[test]

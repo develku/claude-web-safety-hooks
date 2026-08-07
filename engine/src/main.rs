@@ -38,7 +38,8 @@ use web_safety_engine::oplog::{self, Oplog};
 use web_safety_engine::policy::Scanner;
 use web_safety_engine::state::{
     Outcome, StateConfig, StateContext, StateError, StateEvent, StateLayer, StateMode, StateReport,
-    StateStore, STATE_CONTEXT_VERSION, STATE_SCHEMA_VERSION, STATE_SCOPE_KEYS,
+    StateStore, DEFAULT_NOTIFY_WINDOW_SECS, STATE_CONTEXT_VERSION, STATE_SCHEMA_VERSION,
+    STATE_SCOPE_KEYS,
 };
 use web_safety_engine::{egress, urlscreen};
 
@@ -194,7 +195,7 @@ fn precall_decision(
     // false whenever state is off or unreadable, which matches the Bash guard:
     // this is a secondary layer over an already-armed session, and it defers in
     // every case it cannot positively establish.
-    let armed = precall_armed(state, host, request);
+    let armed = precall_armed(state, host, request, log);
 
     // The armed-window WebSearch downgrade is logged, never prompted — the
     // query goes to the configured provider, not an attacker-chosen host.
@@ -301,22 +302,44 @@ fn precall_allow() -> ScanResponse {
 /// Any failure reads as NOT armed. That is the Bash guard's own posture — it
 /// `exit 0`s on a missing, unreadable or garbage arm file — and it is safe
 /// because Layer 6 only ever ADDS a refusal on top of Layers 1-5.
-fn precall_armed(args: &StateArgs, host: Host, request: &ScanRequest) -> bool {
+fn precall_armed(args: &StateArgs, host: Host, request: &ScanRequest, log: &Oplog) -> bool {
     if args.mode == StateMode::Off {
         return false;
     }
-    let Ok(ctx) = state_identity(args, host, request) else {
-        return false;
+    let session = request.session_id.as_deref().unwrap_or("");
+    let mode = args.mode.as_str();
+    // Every failure below still returns "not armed" — that is the guard's
+    // documented posture — but it no longer does so SILENTLY. An unusable store
+    // means Layer 6 cannot fire for the rest of the session, and an operator
+    // who cannot see that has no way to tell a quiet guard from a dead one.
+    let ctx = match state_identity(args, host, request) {
+        Ok(ctx) => ctx,
+        Err(e) => {
+            log.state_error(session, mode, &e.to_string());
+            return false;
+        }
     };
-    // `open` yields None in off mode; both that and an error mean not armed.
-    let Ok(Some(store)) = StateStore::open(StateConfig {
+    let store = match StateStore::open(StateConfig {
         mode: args.mode,
         dir: args.dir.clone().unwrap_or_default(),
-        ..StateConfig::default()
-    }) else {
-        return false;
+        ..args.store_config()
+    }) {
+        Ok(Some(store)) => store,
+        // `None` is `off` mode, which returned above; reaching it here is not
+        // a failure and has nothing to report.
+        Ok(None) => return false,
+        Err(e) => {
+            log.state_error(session, mode, &e.to_string());
+            return false;
+        }
     };
-    matches!(store.armed(&ctx), Ok(Some(_)))
+    match store.armed(&ctx) {
+        Ok(window) => window.is_some(),
+        Err(e) => {
+            log.state_error(session, mode, &e.to_string());
+            false
+        }
+    }
 }
 
 /// Read the operator's URL allowlist and blocklist.
@@ -328,12 +351,40 @@ fn load_lists(config_dir: &Option<PathBuf>) -> (Vec<String>, Vec<String>) {
     let Some(dir) = config_dir else {
         return (Vec::new(), Vec::new());
     };
-    let read = |name: &str| -> Vec<String> {
-        std::fs::read_to_string(dir.join(name))
-            .map(|s| s.lines().map(str::to_string).collect())
-            .unwrap_or_default()
+    (
+        read_list(dir, "url-allowlist.txt"),
+        read_list(dir, "url-blocklist.txt"),
+    )
+}
+
+fn read_list(dir: &std::path::Path, name: &str) -> Vec<String> {
+    std::fs::read_to_string(dir.join(name))
+        .map(|s| s.lines().map(str::to_string).collect())
+        .unwrap_or_default()
+}
+
+/// Is this call's source on the operator's content-trust list?
+///
+/// The port of `web-safety-scanner.sh`'s `host_is_content_trusted`, and the
+/// whole of what `/web-safety-trust` buys: a trusted source keeps being
+/// SCANNED, but a finding downgrades instead of halting or redacting, so an
+/// operator can read a security article that quotes attack strings without the
+/// scanner deleting the page they fetched. The armed egress guard stays as the
+/// backstop.
+///
+/// Fail-safe in every uncertain case, exactly as the shell is: no config dir,
+/// no URL, or an authority that will not resolve means NOT trusted, and the
+/// ordinary protective path runs.
+fn content_trusted(config_dir: &Option<PathBuf>, request: &ScanRequest) -> bool {
+    let Some(dir) = config_dir else { return false };
+    let Some(url) = request.url.as_deref().filter(|u| !u.is_empty()) else {
+        return false;
     };
-    (read("url-allowlist.txt"), read("url-blocklist.txt"))
+    let host = urlscreen::normalize_host(url);
+    if host.is_empty() || host == urlscreen::INVALID_AUTHORITY {
+        return false;
+    }
+    urlscreen::host_in_list(&host, &read_list(dir, "url-content-trust.txt"))
 }
 
 fn containment() -> ScanResponse {
@@ -418,6 +469,40 @@ struct StateArgs {
     runtime: Option<String>,
     content_trusted: bool,
     quarantine_enabled: bool,
+}
+
+impl StateArgs {
+    /// The store configuration every call site shares — so a tunable set for
+    /// the post-call transition is the same one the pre-call arm READ uses.
+    /// They diverged once already, and a window that differs between the writer
+    /// and the reader is an arm that expires at a time nobody chose.
+    fn store_config(&self) -> StateConfig {
+        StateConfig {
+            mode: self.mode,
+            dir: self.dir.clone().unwrap_or_default(),
+            // `WEB_SAFETY_NOTIFY_DEDUP_WINDOW` in `web-safety-scanner.sh`.
+            // Honoured here because the operator's documented switch has to
+            // keep working now that this engine, not the shell, owns dedup.
+            notify_window_secs: env_secs("WEB_SAFETY_NOTIFY_DEDUP_WINDOW")
+                .unwrap_or(DEFAULT_NOTIFY_WINDOW_SECS),
+            ..StateConfig::default()
+        }
+    }
+}
+
+/// A positive whole number of seconds from the environment, or `None`.
+///
+/// A malformed value is `None` rather than an error: the shell hooks treat a
+/// junk tunable the same way — fall back to the default and keep scanning —
+/// and refusing to scan because an env var has a typo would be a worse failure
+/// than ignoring it.
+fn env_secs(key: &str) -> Option<i64> {
+    std::env::var(key)
+        .ok()?
+        .trim()
+        .parse::<i64>()
+        .ok()
+        .filter(|n| *n > 0)
 }
 
 impl Default for StateArgs {
@@ -556,6 +641,26 @@ fn scan(args: &[String]) -> Result<(), Failure> {
     // as a usage error would exit 64 with an empty stdout, and a host wrapper
     // that reads "no response" as "allow" would then fail OPEN in `enforce`,
     // the one mode whose entire job is to fail closed (MAC-24).
+    // The operator's documented env switches, applied AFTER the flags so an
+    // explicit flag always wins. These are honoured because the shell hooks
+    // honoured them and the operator's documentation still promises them — a
+    // switch that silently stopped working is a control the operator thinks
+    // they have and does not.
+    if std::env::var("WEB_SAFETY_SEARCH_QUARANTINE_DISABLE").as_deref() == Ok("1") {
+        state.quarantine_enabled = false;
+    }
+    if let Some(n) = std::env::var("WEB_SAFETY_MAX_SCAN_BYTES")
+        .ok()
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .filter(|n| *n > 0)
+    {
+        // Only when no explicit cap flag was given: `--no-cap` sets `None`, and
+        // an env var must not silently re-impose a cap the caller removed.
+        if config.max_scan_bytes == Some(DEFAULT_MAX_SCAN_BYTES) {
+            config.max_scan_bytes = Some(n);
+        }
+    }
+
     let host = host.ok_or_else(|| Failure::Usage("scan needs --host".into()))?;
     let contract = |err: ContractError| Failure::Contract {
         err,
@@ -591,6 +696,14 @@ fn scan(args: &[String]) -> Result<(), Failure> {
     let mut request = to_request_at(host, event, &env, max_envelope_bytes).map_err(contract)?;
     resolve_task_id(&mut request, state.task.as_deref()).map_err(contract)?;
 
+    // The operator's per-source downgrade list. `--content-trusted` stays an
+    // explicit override for an adapter that resolves trust itself (Hermes
+    // does); when it is not set, the list is consulted here so the shipped
+    // `/web-safety-trust` command keeps working under the engine.
+    if !state.content_trusted {
+        state.content_trusted = content_trusted(&args_config_dir, &request);
+    }
+
     let response = match event {
         Event::PostTool => {
             if routed_out_by_layer8_gate(host, &request) {
@@ -601,7 +714,7 @@ fn scan(args: &[String]) -> Result<(), Failure> {
                 precall_allow()
             } else {
                 let mut r = Scanner::new(config).scan(&request.content);
-                apply_state(&state, host, &request, &mut r);
+                apply_state(&state, host, &request, &mut r, &log);
                 // Planned AFTER state, so an escalation or a quarantine is the
                 // outcome the replacement is built for — not the stateless
                 // verdict it started from.
@@ -801,7 +914,39 @@ fn state_identity(
 ///
 /// In `off` mode this returns before touching anything and the response is
 /// byte-identical to the Stage-3 document.
-fn apply_state(args: &StateArgs, host: Host, request: &ScanRequest, response: &mut ScanResponse) {
+fn apply_state(
+    args: &StateArgs,
+    host: Host,
+    request: &ScanRequest,
+    response: &mut ScanResponse,
+    log: &Oplog,
+) {
+    apply_state_transition(args, host, request, response);
+
+    // One place, every path. A transition that did not reach the store leaves
+    // the session with no arming, no strike history and no kill ledger — in
+    // `report` mode the scan is still delivered, so this row is the ONLY
+    // signal that the stateful half of the defense is not running.
+    if let Some(state) = &response.state {
+        if !state.applied {
+            log.state_error(
+                request.session_id.as_deref().unwrap_or(""),
+                state.mode.as_str(),
+                state
+                    .error
+                    .as_deref()
+                    .unwrap_or("the state transition did not reach the store"),
+            );
+        }
+    }
+}
+
+fn apply_state_transition(
+    args: &StateArgs,
+    host: Host,
+    request: &ScanRequest,
+    response: &mut ScanResponse,
+) {
     if args.mode == StateMode::Off {
         return;
     }
@@ -845,11 +990,7 @@ fn apply_state(args: &StateArgs, host: Host, request: &ScanRequest, response: &m
     // "allow" would turn the strictest mode into the only fail-open in the CLI.
     let report = match state_identity(args, host, request) {
         Ok(ctx) => {
-            let layer = StateLayer::open(StateConfig {
-                mode: args.mode,
-                dir: args.dir.clone().unwrap_or_default(),
-                ..StateConfig::default()
-            });
+            let layer = StateLayer::open(args.store_config());
             layer.apply(&ctx, &event)
         }
         Err(e) => StateLayer::rejected(args.mode, &event, &e),

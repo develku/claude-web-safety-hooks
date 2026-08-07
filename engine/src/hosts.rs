@@ -520,10 +520,19 @@ pub fn to_request_at(
                 url_from(o, &[("tool_input", "url"), ("tool_input", "URL")])?,
                 content_of(output, content_budget),
                 str_field(o, "session_id")?,
-                // `prompt_id` is Claude's task/execution dimension (v2.1.196+).
-                // An older host omits it, and absent is its own scope — never
-                // backfilled from `session_id`.
-                str_field(o, "prompt_id")?,
+                // NOT the task dimension. `prompt_id` is a per-TURN id: the
+                // host's own hook-input schema calls it "UUID correlating a
+                // user prompt with all subsequent events until the next
+                // prompt", so it changes every time the user speaks.
+                //
+                // Correlation state is session-lifetime by design — the armed
+                // egress window, the 3-strike escalation, split-payload
+                // reassembly and the kill ledger all outlive a turn, and the
+                // Bash authority keys every one of them on the session alone.
+                // Putting a turn id in `task_id` partitions all four per turn,
+                // which silently disarms Layer 6 at the next user message and
+                // resets Layers 4 and E8 with it. See [`claude_turn_scope`].
+                None,
                 str_field(o, "agent_id")?,
                 // The command that already RAN, for a Bash result. The Layer 8
                 // routing gate reads it (`web-safety-bash-scan.sh`'s
@@ -560,10 +569,12 @@ pub fn to_request_at(
                 codex_url(o)?,
                 content_of(output, content_budget),
                 str_field(o, "session_id")?,
-                // `turn_id` is Codex's task/execution dimension, the analogue of
-                // Claude's `prompt_id`. Required by the host, so unlike Claude
-                // there is no absent-is-its-own-scope case to model.
-                str_field(o, "turn_id")?,
+                // Same reasoning as Claude's `prompt_id`, and the name says it:
+                // a TURN is not an execution scope. Its presence stays REQUIRED
+                // (the host's schema says so, and a missing one still means the
+                // envelope is not a 0.144.1 PostToolUse), but its value must not
+                // partition session-lifetime correlation state.
+                None,
                 // OPTIONAL in 0.144.1, which is why `state::codex` refuses to
                 // correlate without it rather than treating absence as one
                 // shared agent. Never backfilled from `agent_type`.
@@ -703,9 +714,11 @@ fn pre_tool_request(
                 wide,
                 url_from(o, &[("tool_input", "query")])?,
                 str_field(o, "session_id")?,
-                // Same task/execution dimension as the post-call mapping:
-                // `prompt_id` (v2.1.196+), absent is its own scope.
-                str_field(o, "prompt_id")?,
+                // Not a task — a turn. Same reasoning as the post-call mapping,
+                // and it matters more here: this is the event that READS the
+                // armed window, so a turn-partitioned scope would look for the
+                // arm under a key the HIGH that armed it never wrote.
+                None,
                 url_from(o, &[("tool_input", "command")])?,
             )
         }
@@ -1102,6 +1115,18 @@ const HERMES_NO_PLAN_RECEIPT: &str =
 /// `additionalContext` limit: it is a fixed sentence, not a place for content.
 const MAX_CONTEXT_BYTES: usize = 512;
 
+/// What the model is told when the envelope itself could not be understood —
+/// most commonly a tool result larger than the envelope limit. It claims no
+/// severity and counts no findings, because on this path nothing was scanned.
+const CONTRACT_ERROR_STOP: &str =
+    "web-safety: this tool result was withheld WITHOUT being scanned — the hook could not read \
+     the envelope (most often: the result exceeded the engine's envelope limit). This is not a \
+     detection. You have not seen the result and must not describe or speculate about it. The \
+     operator can raise the limit with --max-envelope-bytes.";
+
+/// The operator-facing half of the same event.
+const CONTRACT_ERROR_NOTE: &str = "web-safety: envelope unreadable — result withheld, not scanned.";
+
 fn encode_claude(
     tool_name: &str,
     res: &ScanResponse,
@@ -1115,7 +1140,13 @@ fn encode_claude(
             // Containment with nothing to plan over — a contract error, where
             // the envelope was never understood well enough to have a shape.
             // Stop; do not pretend to have replaced anything.
-            Decision::Ask | Decision::Block => stop(summary, summary),
+            //
+            // The text is deliberately NOT the severity summary. Nothing was
+            // scanned on this path, so "HIGH (0 finding(s))" told the operator
+            // a prompt injection had been found while simultaneously reporting
+            // that nothing was found — the most confusing possible reading of
+            // an envelope the adapter simply could not parse.
+            Decision::Ask | Decision::Block => stop(CONTRACT_ERROR_NOTE, CONTRACT_ERROR_STOP),
         };
     };
 
@@ -1926,8 +1957,9 @@ mod tests {
         let r = mapped(Host::Codex, &env);
         assert_eq!(r.tool_name, "shell");
         assert_eq!(r.session_id.as_deref(), Some("sess-1"));
-        // `turn_id` is Codex's task/execution dimension.
-        assert_eq!(r.task_id.as_deref(), Some("turn-1"));
+        // `turn_id` is a TURN, not an execution scope — required by the host,
+        // never a correlation key. Same regression as Claude's `prompt_id`.
+        assert_eq!(r.task_id, None);
         assert_eq!(r.url.as_deref(), Some("https://ex.org"));
         assert!(r.content.contains("payload text"));
     }
@@ -2030,6 +2062,25 @@ mod tests {
         let mut env = codex_envelope("shell", json!("text"));
         env["agent_type"] = json!("reviewer");
         assert_eq!(mapped(Host::Codex, &env).agent_id, None);
+    }
+
+    /// The counterpart of the two turn-id tests: Hermes exposes a REAL task —
+    /// a long-lived execution that can run concurrently with another under one
+    /// session — so its `task_id` stays a correlation key. Dropping every task
+    /// dimension would have been the over-correction.
+    #[test]
+    fn a_real_task_dimension_is_still_a_correlation_key() {
+        let env = json!({
+            "tool_name": "web_search",
+            "args": {"url": "https://h.dev"},
+            "result": "text",
+            "session_id": "h1",
+            "task_id": "task-9",
+        });
+        assert_eq!(
+            mapped(Host::Hermes, &env).task_id.as_deref(),
+            Some("task-9")
+        );
     }
 
     #[test]
