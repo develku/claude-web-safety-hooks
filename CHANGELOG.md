@@ -25,6 +25,11 @@ the Bash scanner, which remains the production authority and the rollback path.
   the Bash scanner in `scripts/` remains production.
 - **`docs/rust-core.md` + `docs/state.md`** — the engine's architecture and
   stateful-core documentation (referenced by `engine/README.md`).
+- **`docs/engine-distribution.md`** — R3 decision: engine distributes **build-in-tree**
+  (source shipped, built at enable time from the pinned toolchain) with `WEB_SAFETY_ENGINE`
+  kept as the operator override. Prebuilt binary rejected for the dormant phase. The
+  deterministic in-tree path is what makes the fail-closed grey-out diagnosable via an
+  out-of-band doctor (M1–M5 failure table in the doc).
 
 ### Rollback
 
