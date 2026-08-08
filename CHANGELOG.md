@@ -2,6 +2,35 @@
 
 All notable changes to this project. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased] — 9.0.1 cutover hardening (STAGED, not shipped)
+
+Pre-activation cutover hardening requested by the security review (finding F1, Low) and
+honoured as a condition of the operator's approval. Local commit only — the live config
+still runs v6.2.2 Bash; nothing is enabled, pushed, or wired into a live hook.
+
+### Fixed
+
+- **F1 — a crashing engine now fails closed.** The `hooks/hooks.json` wrapper previously
+  emitted its explicit block/withhold **only** when the engine binary was *missing*; a
+  binary that was *present but crashed at runtime* (non-zero exit + empty stdout) reached
+  the harness as an empty document, which several hosts read as "allow". All four engine
+  hook commands now capture the engine's stdout and exit code; a non-zero exit with empty
+  stdout emits an explicit fail-closed decision (PreToolUse `{"decision":"block"}`, PostToolUse
+  `{"continue":false,"stopReason":...}`) instead of an empty verdict. The engine's own
+  contract-error containment (exit 2 with a real document on stdout) is preserved unchanged.
+  Guarded by 2 new end-to-end checks in `tests/run-wiring-probe.sh` that shadow the real
+  engine with a script that exits non-zero — reverting the wrapper makes them fail.
+
+### Verified
+
+- **F3 — explicit state flags in the shipping wiring.** Confirmed all four engine sites in
+  `hooks/hooks.json` carry `--state-mode report --state-dir ${WEB_SAFETY_CONFIG_DIR:-$HOME/.claude/hooks}/engine-state --state-namespace default` (never relying on the engine CLI's `off` default).
+
+### Rollback
+
+Unchanged: rewire `hooks/hooks.json` back to the Bash scripts (`scripts/*`), which remain
+the frozen differential oracle, the Layer 7 bridge, and the operator's rollback path.
+
 ## [9.0.1] — 2026-08-08 — post-flip audit: the controls v9.0.0 quietly took away
 
 **A multi-agent audit of the Claude path** (six independent dimensions; every

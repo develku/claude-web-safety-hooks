@@ -204,6 +204,34 @@ printf '%s' "$ENV" | "$ENGINE" scan --host claude --event post-tool \
 grep -q "\[STATE-ERROR\]" "$SCRATCH/config/web-safety.log" \
   && ok "an unusable state root leaves a [STATE-ERROR] row" || bad "state failure is still silent"
 
+# ── 13. F1 hardening (cutover finding, Low): a CRASHING engine is fail-closed ─
+# The wrapper fails closed when the engine binary is MISSING; this guards the
+# sibling case it did not cover — the binary PRESENT but crashing at runtime
+# (non-zero exit + empty stdout -> no verdict). The fix treats any such exit as
+# a block/withhold, so a container gets an explicit decision instead of an
+# empty document that every context reads as "allow". The real engine is
+# shadowed by a script that exits non-zero and prints nothing, delivered via
+# CLAUDE_PLUGIN_ROOT (the exact mechanism the hook command reads).
+CRASH_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/web-safety-f1-XXXXXX")
+mkdir -p "$CRASH_ROOT/engine/target/release"
+printf '#!/bin/bash\nexit 42\n' > "$CRASH_ROOT/engine/target/release/web-safety-engine"
+chmod +x "$CRASH_ROOT/engine/target/release/web-safety-engine"
+for ev in pre post; do
+  CMDDOC=$([ "$ev" = "pre" ] && printf '%s' "$PRE_WEB" || printf '%s' "$POST_WEB")
+  ENV='{"tool_name":"WebFetch","tool_input":{"url":"https://e.test"},"session_id":"probe-f1","permission_mode":"default"}'
+  E=$(printf '%s' "$ENV" | CLAUDE_PLUGIN_ROOT="$CRASH_ROOT" bash -c "$CMDDOC" 2>/dev/null)
+  if [ "$ev" = "pre" ]; then
+    printf '%s' "$E" | jq -e '.decision == "block"' >/dev/null 2>&1 \
+      && ok "F1: crashing engine on pre-tool → fail-closed block" \
+      || bad "F1: crashing engine pre-tool not fail-closed: $E"
+  else
+    printf '%s' "$E" | jq -e '.continue == false' >/dev/null 2>&1 \
+      && ok "F1: crashing engine on post-tool → withhold (continue:false)" \
+      || bad "F1: crashing engine post-tool not fail-closed: $E"
+  fi
+done
+rm -rf "$CRASH_ROOT"
+
 echo ""
 echo "probe result: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

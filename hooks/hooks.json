@@ -7,7 +7,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "E=\"${CLAUDE_PLUGIN_ROOT}/engine/target/release/web-safety-engine\"; if [ -x \"$E\" ]; then exec \"$E\" scan --host claude --event pre-tool --config-dir \"${WEB_SAFETY_CONFIG_DIR:-$HOME/.claude/hooks}\" --default-allowlist \"${CLAUDE_PLUGIN_ROOT}/scripts/web-safety-default-allowlist.txt\" --state-mode report --state-dir \"${WEB_SAFETY_CONFIG_DIR:-$HOME/.claude/hooks}/engine-state\" --state-namespace default; else printf '%s' '{\"decision\":\"block\",\"reason\":\"web-safety: engine binary missing (fail-closed). Build it: cargo build --release in the plugin engine/ directory.\"}'; fi"
+            "command": "E=\"${CLAUDE_PLUGIN_ROOT}/engine/target/release/web-safety-engine\"; if [ -x \"$E\" ]; then OUT=$(\"${CLAUDE_PLUGIN_ROOT}/engine/target/release/web-safety-engine\" scan --host claude --event pre-tool --config-dir \"${WEB_SAFETY_CONFIG_DIR:-$HOME/.claude/hooks}\" --default-allowlist \"${CLAUDE_PLUGIN_ROOT}/scripts/web-safety-default-allowlist.txt\" --state-mode report --state-dir \"${WEB_SAFETY_CONFIG_DIR:-$HOME/.claude/hooks}/engine-state\" --state-namespace default); RC=$?; if [ \"$RC\" -ne 0 ] && [ -z \"$OUT\" ]; then printf '%s' '{\"decision\":\"block\",\"reason\":\"web-safety: engine failed (fail-closed block).\"}'; else printf '%s' \"$OUT\"; fi; else printf '%s' '{\"decision\":\"block\",\"reason\":\"web-safety: engine binary missing (fail-closed). Build it: cargo build --release in the plugin engine/ directory.\"}'; fi"
           }
         ]
       },
@@ -16,7 +16,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "E=\"${CLAUDE_PLUGIN_ROOT}/engine/target/release/web-safety-engine\"; [ -x \"$E\" ] || exit 0; exec \"$E\" scan --host claude --event pre-tool --config-dir \"${WEB_SAFETY_CONFIG_DIR:-$HOME/.claude/hooks}\" --default-allowlist \"${CLAUDE_PLUGIN_ROOT}/scripts/web-safety-default-allowlist.txt\" --state-mode report --state-dir \"${WEB_SAFETY_CONFIG_DIR:-$HOME/.claude/hooks}/engine-state\" --state-namespace default"
+            "command": "E=\"${CLAUDE_PLUGIN_ROOT}/engine/target/release/web-safety-engine\"; [ -x \"$E\" ] || exit 0; OUT=$(\"${CLAUDE_PLUGIN_ROOT}/engine/target/release/web-safety-engine\" scan --host claude --event pre-tool --config-dir \"${WEB_SAFETY_CONFIG_DIR:-$HOME/.claude/hooks}\" --default-allowlist \"${CLAUDE_PLUGIN_ROOT}/scripts/web-safety-default-allowlist.txt\" --state-mode report --state-dir \"${WEB_SAFETY_CONFIG_DIR:-$HOME/.claude/hooks}/engine-state\" --state-namespace default); RC=$?; if [ \"$RC\" -ne 0 ] && [ -z \"$OUT\" ]; then printf '%s' '{\"decision\":\"block\",\"reason\":\"web-safety: engine failed (fail-closed block).\"}'; else printf '%s' \"$OUT\"; fi"
           }
         ]
       }
@@ -27,7 +27,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "E=\"${CLAUDE_PLUGIN_ROOT}/engine/target/release/web-safety-engine\"; if [ -x \"$E\" ]; then exec \"$E\" scan --host claude --event post-tool --max-envelope-bytes 8388608 --config-dir \"${WEB_SAFETY_CONFIG_DIR:-$HOME/.claude/hooks}\" --state-mode report --state-dir \"${WEB_SAFETY_CONFIG_DIR:-$HOME/.claude/hooks}/engine-state\" --state-namespace default; else printf '%s' '{\"continue\":false,\"stopReason\":\"web-safety: engine binary missing \u2014 this tool result was withheld fail-closed. Build the engine: cargo build --release in the plugin engine/ directory.\"}'; fi",
+            "command": "E=\"${CLAUDE_PLUGIN_ROOT}/engine/target/release/web-safety-engine\"; if [ -x \"$E\" ]; then OUT=$(\"${CLAUDE_PLUGIN_ROOT}/engine/target/release/web-safety-engine\" scan --host claude --event post-tool --max-envelope-bytes 8388608 --config-dir \"${WEB_SAFETY_CONFIG_DIR:-$HOME/.claude/hooks}\" --state-mode report --state-dir \"${WEB_SAFETY_CONFIG_DIR:-$HOME/.claude/hooks}/engine-state\" --state-namespace default); RC=$?; if [ \"$RC\" -ne 0 ] && [ -z \"$OUT\" ]; then printf '%s' '{\"continue\":false,\"stopReason\":\"web-safety: engine failed \u2014 this tool result was withheld fail-closed.\"}'; else printf '%s' \"$OUT\"; fi; else printf '%s' '{\"continue\":false,\"stopReason\":\"web-safety: engine binary missing \u2014 this tool result was withheld fail-closed. Build the engine: cargo build --release in the plugin engine/ directory.\"}'; fi",
             "timeout": 10000
           }
         ]
@@ -37,7 +37,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "E=\"${CLAUDE_PLUGIN_ROOT}/engine/target/release/web-safety-engine\"; [ -x \"$E\" ] || exit 0; exec \"$E\" scan --host claude --event post-tool --max-envelope-bytes 8388608 --config-dir \"${WEB_SAFETY_CONFIG_DIR:-$HOME/.claude/hooks}\" --state-mode report --state-dir \"${WEB_SAFETY_CONFIG_DIR:-$HOME/.claude/hooks}/engine-state\" --state-namespace default",
+            "command": "E=\"${CLAUDE_PLUGIN_ROOT}/engine/target/release/web-safety-engine\"; [ -x \"$E\" ] || exit 0; OUT=$(\"${CLAUDE_PLUGIN_ROOT}/engine/target/release/web-safety-engine\" scan --host claude --event post-tool --max-envelope-bytes 8388608 --config-dir \"${WEB_SAFETY_CONFIG_DIR:-$HOME/.claude/hooks}\" --state-mode report --state-dir \"${WEB_SAFETY_CONFIG_DIR:-$HOME/.claude/hooks}/engine-state\" --state-namespace default); RC=$?; if [ \"$RC\" -ne 0 ] && [ -z \"$OUT\" ]; then printf '%s' '{\"continue\":false,\"stopReason\":\"web-safety: engine failed \u2014 this tool result was withheld fail-closed.\"}'; else printf '%s' \"$OUT\"; fi",
             "timeout": 10000
           }
         ]
