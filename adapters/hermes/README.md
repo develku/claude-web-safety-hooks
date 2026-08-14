@@ -45,6 +45,12 @@ string first owns the result, so either could silently clobber the other's value
 no tool is ever in both plugins' target sets, neither can override the other: coverage is
 disjoint **by construction**, not by luck of hook ordering.
 
+The terminal hook is a separate interception seam: it already scans every
+foreground terminal result before truncation, and it does not participate in
+`transform_tool_result` dispatch.  Gmail handling below therefore does **not** add
+`terminal` to this allowlist or create a first-valid-string race with
+security-guidance.
+
 The allowlist is grounded in Hermes 0.20.0's own tool registry (`tools/*.py`):
 
 | Kind | Tools |
@@ -124,6 +130,65 @@ and the reproduction: `engine/tests/fixtures/hermes-0.20.0/README.md`.
 | `WEB_SAFETY_TOOLS` | *(empty)* | comma-separated extra web-tool wire names to allowlist (e.g. MCP fetch/search tools such as `mcp__nous__fetch`) |
 
 PATH is never searched: a binary that merely shares the name is not this engine.
+
+## Gmail untrusted-data boundary
+
+Hermes retrieves Gmail through the bundled google-workspace compatibility script,
+so the host reports it as terminal output rather than as a distinct Gmail tool.  A
+clean content scan alone is not a semantic trust decision: message sender, subject,
+snippet, and body remain external data even when no detector fires.
+
+After the existing fail-closed engine scan returns clean, the adapter wraps output
+only when the terminal command is conservatively proven to be one successful,
+read-only invocation of the exact script under the active
+`HERMES_HOME/skills` tree (or the exact `HERMES_BUNDLED_SKILLS` tree explicitly
+advertised by a source/package checkout):
+
+```text
+.../skills/productivity/google-workspace/scripts/google_api.py gmail search ...
+.../skills/productivity/google-workspace/scripts/google_api.py gmail get ...
+```
+
+The frame labels the payload as untrusted Gmail data and uses a fresh 128-bit nonce
+in matching begin/end delimiters.  If either generated delimiter already occurs in
+the payload, the nonce is regenerated; repeated collisions fail closed. Mixed shell
+commands, separators, pipes, every redirect/descriptor form, here-strings, command
+substitution, newlines, glob/expansion forms, interpreter flags/wrappers,
+suffix-identical lookalike scripts, non-zero exits, Calendar operations, and Gmail
+writes are not labelled as Gmail. They retain the pre-existing terminal behavior
+and are still scanned normally.
+
+Scanner containment and scanner failures always outrank the frame: a finding,
+missing engine, malformed verdict, or timeout returns the static containment string
+without exposing message content.
+
+### Verification evidence and proof boundary
+
+The Gmail boundary is tested through Hermes' real `PluginManager` and the compiled
+Rust engine, with controlled command and output fixtures. The 2026-08-14 reference
+run on the current working tree produced:
+
+| Gate | Result |
+|---|---:|
+| Hermes adapter smoke | 108 passed, 0 failed |
+| Rust `cargo test --locked` | 561 passed, 0 failed |
+| Legacy shell suites (7) | 359 passed, 0 failed |
+| Python `py_compile`, `git diff --check` | passed |
+| `cargo fmt --check`, Clippy with warnings denied | passed |
+
+The focused smoke proves the implemented contract for clean authenticated framing,
+direct injection containment, delimiter-forgery resistance, exact nonce-collision
+regeneration, canonical-path enforcement, read-versus-write discrimination, shell
+composition rejection, unrelated-terminal preservation, and fail-closed scanner
+missing/timeout paths. In the containment cases it also asserts that the original
+mail fixture is absent from the model-visible result.
+
+This is strong executable evidence for those specified properties, **not** a formal
+proof that every possible email attack is impossible. The reference run did not
+access a Gmail account, perform an OAuth/API round trip, prove that any particular
+Hermes profile is running this checkout, fuzz every shell spelling, or independently
+audit the detector. A controlled read-only Gmail end-to-end deployment test is still
+required before claiming live-account or installed-profile verification.
 
 ## Diagnostic (doctor)
 

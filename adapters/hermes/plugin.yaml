@@ -6,7 +6,9 @@ description: >-
   result before the model reads it. Holds no pattern, no severity rule and no
   normalization step of its own. Fail-closed: when the engine is missing, times
   out, or returns anything the host would discard, the result is withheld rather
-  than passed through. NOT INSTALLED AND NOT ENABLED — see README.md.
+  than passed through. Clean Gmail reads through the bundled google-workspace
+  terminal script receive a nonce-authenticated untrusted-data frame. NOT
+  INSTALLED AND NOT ENABLED — see README.md.
 author: "develku (claude-web-safety-hooks)"
 hooks:
   - pre_tool_call
