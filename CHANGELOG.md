@@ -1851,7 +1851,7 @@ Plugin packaging + portability + reliability pass after operator migrated to a n
 - **Hard-block / soft-block split in URL pre-screening.** Hard blocks (SSRF, schemes, IP, credentials, oversize, encoding) always apply. Soft blocks (high-risk TLD, custom blocklist) can be short-circuited by the new allowlist.
 - **`LOG_FILE` and `BLOCKLIST` resolution** in both `web-safety-approve.sh` and `web-safety-scanner.sh` use `WEB_SAFETY_CONFIG_DIR` instead of hardcoded `$HOME/.claude/hooks/`.
 
-## [4.2.0] — 2026-04-14
+## [5.1.1] — 2026-04-14
 
 ### Added
 
